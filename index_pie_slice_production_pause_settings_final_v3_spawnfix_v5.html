@@ -4228,6 +4228,234 @@ Examples:
   // Log API availability
   log('INFO', 'Testing API loaded: window.NEOVECTR');
   log('INFO', 'Type NEOVECTR.help() for usage');
+  
+  // ===============================
+  // Watchdog & Health Monitoring System
+  // ===============================
+  const WATCHDOG = {
+    enabled: true,
+    lastFrameTime: performance.now(),
+    lastStateHash: '',
+    freezeThreshold: 3000, // 3 seconds without frame = freeze
+    fpsThreshold: 10, // Below 10 FPS = problem
+    freezeCount: 0,
+    maxFreezes: 3, // After 3 freezes, force menu
+    validationInterval: 5000, // Validate every 5 seconds
+    lastValidation: performance.now(),
+    
+    // Ping test - returns true if system is responsive
+    ping() {
+      const now = performance.now();
+      const timeSinceLastFrame = now - this.lastFrameTime;
+      const isFrozen = timeSinceLastFrame > this.freezeThreshold;
+      const currentFPS = perfFrames / Math.max(0.001, perfTimer);
+      const isSlowFPS = currentFPS < this.fpsThreshold && perfTimer > 2;
+      
+      return {
+        alive: !isFrozen,
+        fps: currentFPS,
+        timeSinceLastFrame,
+        isFrozen,
+        isSlowFPS,
+        freezeCount: this.freezeCount,
+        appMode,
+        timestamp: now
+      };
+    },
+    
+    // Validate game state integrity
+    validateState() {
+      const errors = [];
+      
+      try {
+        // Check critical variables exist
+        if (typeof appMode === 'undefined') errors.push('appMode undefined');
+        if (typeof players === 'undefined') errors.push('players undefined');
+        if (typeof canvas === 'undefined') errors.push('canvas undefined');
+        if (typeof ctx === 'undefined') errors.push('ctx undefined');
+        
+        // Check game mode is valid
+        if (!['BOOT_WAIT', 'BOOT', 'MENU', 'GAME', 'PAUSE', 'VICTORY'].includes(appMode)) {
+          errors.push(`Invalid appMode: ${appMode}`);
+        }
+        
+        // Check players array
+        if (players && appMode === 'GAME') {
+          if (!Array.isArray(players)) errors.push('players is not an array');
+          else if (players.length === 0) errors.push('No players in game');
+          else {
+            // Check each player has required properties
+            players.forEach((p, i) => {
+              if (typeof p.x !== 'number' || isNaN(p.x)) errors.push(`Player ${i} has invalid x`);
+              if (typeof p.y !== 'number' || isNaN(p.y)) errors.push(`Player ${i} has invalid y`);
+            });
+          }
+        }
+        
+        // Check canvas is valid
+        if (canvas && (!canvas.width || !canvas.height)) {
+          errors.push('Canvas has invalid dimensions');
+        }
+        
+        // Check for NaN in critical vars
+        if (isNaN(perfTimer)) errors.push('perfTimer is NaN');
+        if (isNaN(perfFrames)) errors.push('perfFrames is NaN');
+        
+      } catch (e) {
+        errors.push(`Validation exception: ${e.message}`);
+      }
+      
+      return {
+        valid: errors.length === 0,
+        errors,
+        timestamp: performance.now()
+      };
+    },
+    
+    // Update frame tracking
+    heartbeat() {
+      this.lastFrameTime = performance.now();
+      
+      // Periodic validation
+      if (this.lastFrameTime - this.lastValidation > this.validationInterval) {
+        this.lastValidation = this.lastFrameTime;
+        const validation = this.validateState();
+        
+        if (!validation.valid) {
+          log('WARN', `State validation failed: ${validation.errors.join(', ')}`);
+          console.warn('WATCHDOG: State validation failed', validation);
+        }
+      }
+    },
+    
+    // Check for freeze and recover
+    checkFreeze() {
+      const ping = this.ping();
+      
+      if (ping.isFrozen) {
+        this.freezeCount++;
+        log('ERROR', `FREEZE DETECTED! Count: ${this.freezeCount}/${this.maxFreezes}`);
+        console.error('WATCHDOG: Freeze detected', ping);
+        
+        if (this.freezeCount >= this.maxFreezes) {
+          log('ERROR', 'Max freezes reached - forcing menu recovery');
+          this.forceRecovery();
+        }
+        return true;
+      }
+      
+      if (ping.isSlowFPS) {
+        log('WARN', `Low FPS detected: ${ping.fps.toFixed(1)} fps`);
+      }
+      
+      return false;
+    },
+    
+    // Force recovery to menu
+    forceRecovery() {
+      try {
+        log('INFO', 'WATCHDOG: Initiating graceful recovery');
+        
+        // Stop all audio
+        try {
+          if (menuMusicEl) menuMusicEl.pause();
+          if (bootAudioEl) bootAudioEl.pause();
+        } catch (e) {
+          console.error('Recovery: audio stop failed', e);
+        }
+        
+        // Clear game state
+        try {
+          lasers.length = 0;
+          sparks.length = 0;
+        } catch (e) {
+          console.error('Recovery: clear arrays failed', e);
+        }
+        
+        // Return to menu
+        try {
+          appMode = 'MENU';
+          menuPage = 'MAIN';
+          menuSel = 0;
+          menuPageEnterT0 = performance.now();
+          this.freezeCount = 0;
+          log('INFO', 'WATCHDOG: Recovery complete - returned to menu');
+        } catch (e) {
+          console.error('Recovery: menu transition failed', e);
+          // Last resort: reload page
+          log('ERROR', 'Recovery failed - reloading page in 2s');
+          setTimeout(() => window.location.reload(), 2000);
+        }
+      } catch (e) {
+        console.error('WATCHDOG: Recovery failed catastrophically', e);
+        alert('Game encountered a critical error and will reload.');
+        window.location.reload();
+      }
+    },
+    
+    // Manual recovery trigger
+    recover() {
+      log('INFO', 'Manual recovery triggered');
+      this.forceRecovery();
+    }
+  };
+  
+  // Add watchdog to API
+  window.NEOVECTR.watchdog = {
+    ping: () => WATCHDOG.ping(),
+    validate: () => WATCHDOG.validateState(),
+    recover: () => WATCHDOG.recover(),
+    getStatus() {
+      const ping = WATCHDOG.ping();
+      const validation = WATCHDOG.validateState();
+      return {
+        ...ping,
+        validation,
+        enabled: WATCHDOG.enabled,
+        maxFreezes: WATCHDOG.maxFreezes
+      };
+    },
+    enable() { WATCHDOG.enabled = true; log('INFO', 'Watchdog enabled'); },
+    disable() { WATCHDOG.enabled = false; log('INFO', 'Watchdog disabled'); }
+  };
+  
+  // Integrate watchdog into frame loop
+  const _originalRequestAnimationFrame = window.requestAnimationFrame;
+  window.requestAnimationFrame = function(callback) {
+    return _originalRequestAnimationFrame.call(window, function(time) {
+      if (WATCHDOG.enabled) {
+        WATCHDOG.heartbeat();
+      }
+      callback(time);
+    });
+  };
+  
+  // Periodic freeze check (every 5 seconds)
+  setInterval(() => {
+    if (WATCHDOG.enabled && appMode === 'GAME') {
+      WATCHDOG.checkFreeze();
+    }
+  }, 5000);
+  
+  // Global error handler with recovery
+  window.addEventListener('error', (event) => {
+    log('ERROR', `Uncaught error: ${event.message}`);
+    console.error('Global error:', event);
+    
+    if (appMode === 'GAME' && WATCHDOG.enabled) {
+      log('WARN', 'Error during game - triggering recovery');
+      setTimeout(() => WATCHDOG.recover(), 1000);
+    }
+  });
+  
+  // Unhandled promise rejection handler
+  window.addEventListener('unhandledrejection', (event) => {
+    log('ERROR', `Unhandled promise rejection: ${event.reason}`);
+    console.error('Promise rejection:', event);
+  });
+  
+  log('INFO', 'Watchdog system initialized');
+  log('INFO', 'Use NEOVECTR.watchdog.getStatus() to check health');
 })();
 </script>
 
