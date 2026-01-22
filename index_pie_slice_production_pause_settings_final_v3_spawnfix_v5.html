@@ -1558,6 +1558,23 @@ const audioStatusEl = document.getElementById('audioStatus');
         bootAudioEl.volume = Math.max(0, Math.min(1, settings.sfxVol ?? 0.85));
         audioDbg.boot.src = BOOT_SOUND_SRC;
         wireAudioDebug(bootAudioEl, 'boot');
+        
+        // Setup WebAudio analyser for spectrum visualizer
+        try {
+          if (!bootCtx) {
+            bootCtx = new (window.AudioContext || window.webkitAudioContext)();
+            bootAnalyser = bootCtx.createAnalyser();
+            bootAnalyser.fftSize = 2048;
+            bootMediaSrc = bootCtx.createMediaElementSource(bootAudioEl);
+            bootMediaSrc.connect(bootAnalyser);
+            bootAnalyser.connect(bootCtx.destination);
+            bootFreq = new Uint8Array(bootAnalyser.frequencyBinCount);
+            bootTime = new Uint8Array(bootAnalyser.frequencyBinCount);
+            log('INFO', 'Boot visualizer: analyser created');
+          }
+        } catch (e) {
+          log('WARN', `Boot visualizer failed: ${e.message}`);
+        }
       }
 
       // Always play boot sound directly from the media element.
@@ -2642,9 +2659,6 @@ function menuItemsSettings(){
           setPlayerCount(v);
         },
         action: ()=> { /* no-op */ }
-      },
-      { kind:'toggle', key:'coop', labelFn: () => `CO-OP: ${onOff(settings.coop)}`,
-        action: ()=> { settings.coop = !settings.coop; if (settings.coop && playerCount < 2) setPlayerCount(2); log('INFO',`CO-OP: ${onOff(settings.coop)}`); }
       },
       
       // === VIDEO SECTION ===
