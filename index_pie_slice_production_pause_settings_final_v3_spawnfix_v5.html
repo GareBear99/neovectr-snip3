@@ -18,6 +18,7 @@
       border-radius: 10px;
       backdrop-filter: blur(4px);
       max-width: min(580px, calc(100vw - 20px));
+      display: none; /* Hidden by default - toggle in settings */
     }
     #hud .row { display:flex; gap:10px; flex-wrap: wrap; }
     #hud kbd {
@@ -260,8 +261,8 @@ function installAudioUnlockHooks(logFn){
     snip3Hud: true,
     seedStr: '',          // empty = auto
     seedOverlay: true,    // show seed briefly at run start
-    debugOnMenu: true,    // show debug panel while in menus
-    debugHudVisible: true,   // NEW: Current HUD visibility state
+    debugOnMenu: false,    // show debug panel while in menus
+    debugHudVisible: false,   // Current HUD visibility state (hidden by default)
   };
   // Back-compat alias (some subsystems reference SETTINGS)
   const SETTINGS = settings;
@@ -454,7 +455,7 @@ function installAudioUnlockHooks(logFn){
   let menuSel = 0;
   let prevMenuSel = 0;
   let menuClickDown = false;
-  let debugVisible = true;
+  let debugVisible = false;
   function setDebugVisible(v){
     debugVisible = !!v;
     const hud = document.getElementById('hud');
@@ -470,7 +471,7 @@ function installAudioUnlockHooks(logFn){
   if (settings.hasOwnProperty('debugHudVisible')) {
     setDebugVisible(settings.debugHudVisible);
   } else {
-    setDebugVisible(true); // Default: visible
+    setDebugVisible(false); // Default: hidden
   }
   // Auto-hide after boot completes unless user enables debugOnMenu
   let _bootAutoHideTimer = null;
@@ -2550,7 +2551,17 @@ const audioStatusEl = document.getElementById('audioStatus');
     return [
       { labelFn: (now) => snip3MenuLabel(now), action: () => { stopMenuMusic(); gameMode = 'SNIP3'; appMode = 'GAME'; menuPage='MAIN'; setPlayerCount(1); resetP1Systems(); setDebugVisible(false); setSeed(settings.seedStr); initPlayers(); log('INFO','Mode: ∞ SNIP3 (infinite sniper)'); } },
       { label: 'VS MODE', action: () => { menuPage = 'VS_PRE'; menuSel = 0; menuPageEnterT0 = performance.now(); playMenuSwitchSfx(); log('INFO','VS: Pre-menu opened'); } },
-      { label: 'SETTINGS', action: () => { menuPage = 'SETTINGS'; menuSel = 0; menuPageEnterT0 = performance.now(); setDebugVisible(true); saveSettings(); log('INFO','SNIP3: Settings opened'); } },
+      { label: 'SETTINGS', action: () => { 
+        menuPage = 'SETTINGS'; 
+        menuSel = 0;
+        // Skip initial header
+        const items = menuItemsSettings();
+        while (items[menuSel] && items[menuSel].kind === 'header' && menuSel < items.length - 1) menuSel++;
+        menuPageEnterT0 = performance.now(); 
+        setDebugVisible(true); 
+        saveSettings(); 
+        log('INFO','SNIP3: Settings opened'); 
+      } },
       { label: 'CREDITS', action: () => { menuPage = 'CREDITS'; menuSel = 0; menuPageEnterT0 = performance.now(); log('INFO','SNIP3: Credits opened'); } },
     ];
   }
@@ -2604,6 +2615,8 @@ function menuItemsSettings(){
     };
 
     return [
+      // === GAME SECTION ===
+      { kind:'header', label: '═══ GAME ═══' },
       { kind:'action', key:'seed', labelFn: () => `SEED: ${settings.seedStr ? settings.seedStr : 'AUTO'}  (ENTER)`,
         action: ()=> {
           const cur = settings.seedStr || '';
@@ -2633,18 +2646,9 @@ function menuItemsSettings(){
       { kind:'toggle', key:'coop', labelFn: () => `CO-OP: ${onOff(settings.coop)}`,
         action: ()=> { settings.coop = !settings.coop; if (settings.coop && playerCount < 2) setPlayerCount(2); log('INFO',`CO-OP: ${onOff(settings.coop)}`); }
       },
-      { kind:'toggle', key:'lobby', labelFn: () => `LOBBY: ${pubPriv(settings.lobbyPrivate)}`,
-        action: ()=> { settings.lobbyPrivate = !settings.lobbyPrivate; log('INFO',`Lobby: ${pubPriv(settings.lobbyPrivate)}`); }
-      },
-      { kind:'action', key:'pw', labelFn: () => `ADVANCED: PASSWORD ${settings.lobbyPassword ? 'SET' : 'OFF'}`,
-        action: ()=> {
-          const cur = settings.lobbyPassword || '';
-          const v = prompt('Set lobby password (optional). Leave blank to clear.', cur);
-          if (v === null) return;
-          settings.lobbyPassword = String(v).trim();
-          log('INFO', settings.lobbyPassword ? 'Lobby password set' : 'Lobby password cleared');
-        }
-      },
+      
+      // === VIDEO SECTION ===
+      { kind:'header', label: '═══ VIDEO ═══' },
       { kind:'slider', key:'brightness', labelFn: () => `BRIGHTNESS: ${brightPct()}`,
         onLeft: ()=> { settings.brightness = Math.max(-0.30, (settings.brightness||0) - 0.02); },
         onRight: ()=> { settings.brightness = Math.min( 0.30, (settings.brightness||0) + 0.02); },
@@ -2654,6 +2658,9 @@ function menuItemsSettings(){
         },
         action: ()=> {}
       },
+      
+      // === AUDIO SECTION ===
+      { kind:'header', label: '═══ AUDIO ═══' },
       { kind:'slider', key:'music', labelFn: () => `MUSIC VOL: ${pct(settings.musicVol)}`,
         onLeft: ()=> { settings.musicVol = Math.max(0, (settings.musicVol||0) - 0.05); if (menuMusicEl) menuMusicEl.volume = settings.musicVol; },
         onRight: ()=> { settings.musicVol = Math.min(1, (settings.musicVol||0) + 0.05); if (menuMusicEl) menuMusicEl.volume = settings.musicVol; },
@@ -2684,9 +2691,16 @@ function menuItemsSettings(){
         action: ()=> { settings.sfxMenu = !settings.sfxMenu; saveSettings(); log('INFO',`Menu SFX: ${onOff(settings.sfxMenu)}`); }
       },
       
-      { kind:'toggle', key:'snip3', labelFn: () => `SNIP3 TELEMETRY: ${onOff(settings.snip3Hud)}`,
-        action: ()=> { settings.snip3Hud = !settings.snip3Hud; const hud = document.getElementById('hud'); if (hud) hud.style.display = settings.snip3Hud ? 'block' : 'none'; saveSettings(); log('INFO',`SNIP3 Telemetry: ${onOff(settings.snip3Hud)}`); }
+      
+      // === DEBUG SECTION ===
+      { kind:'header', label: '═══ DEBUG ═══' },
+      { kind:'toggle', key:'debugHud', labelFn: () => `DEBUG HUD: ${onOff(settings.debugHudVisible)}`,
+        action: ()=> { setDebugVisible(!settings.debugHudVisible); saveSettings(); log('INFO',`Debug HUD: ${onOff(settings.debugHudVisible)}`); }
       },
+      { kind:'toggle', key:'snip3', labelFn: () => `TELEMETRY INFO: ${onOff(settings.snip3Hud)}`,
+        action: ()=> { settings.snip3Hud = !settings.snip3Hud; saveSettings(); log('INFO',`Telemetry: ${onOff(settings.snip3Hud)}`); }
+      },
+      
       { kind:'back', key:'back', label: 'BACK', action: ()=> { menuPage='MAIN'; menuSel=0; menuPageEnterT0 = performance.now(); } },
     ];
   }
@@ -2791,19 +2805,31 @@ function menuItemsSettings(){
 
     for (let i=0;i<items.length;i++){
       const y = baseY + i*stepY;
+      const item = items[i];
+      const isHeader = item.kind === 'header';
       const isSel = i === menuSel;
+      
+      // Headers: dim, smaller, no selection
+      if (isHeader) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.font = `700 ${Math.floor(fs*0.26)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+        ctx.fillStyle = 'rgba(255,200,255,0.35)';
+        ctx.fillText(item.label, a.cx, y);
+        continue;
+      }
+      
       const glow = isSel ? 0.85 + 0.15*Math.sin(t*6.0) : 0.50;
       ctx.globalCompositeOperation = 'lighter';
       ctx.font = `${isSel ? 800 : 650} ${Math.floor(fs*0.30)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
       ctx.fillStyle = `rgba(120,255,255,${glow})`;
       {
-        const label = items[i].labelFn ? items[i].labelFn(now) : items[i].label;
+        const label = item.labelFn ? item.labelFn(now) : item.label;
         const metrics = ctx.measureText(label);
         const leftEdge = a.cx - metrics.width*0.5;
         const arrowGap = fs*0.30;
         if (isSel) ctx.fillText('▶', leftEdge - arrowGap, y);
       }
-      const label = items[i].labelFn ? items[i].labelFn(now) : items[i].label;
+      const label = item.labelFn ? item.labelFn(now) : item.label;
       ctx.fillText(label, a.cx, y);
 
       // Lightweight slider visualization for selected sliders
@@ -3633,8 +3659,21 @@ function drawMenuScreen(now){
       }
 
 
-      if ((up || gpUp) && !(prevMenuUp || prevGpUp)) menuSel = (menuSel - 1 + items.length) % items.length;
-      if ((down || gpDown) && !(prevMenuDown || prevGpDown)) menuSel = (menuSel + 1) % items.length;
+      // Navigate up/down, skipping headers
+      if ((up || gpUp) && !(prevMenuUp || prevGpUp)) {
+        let newSel = (menuSel - 1 + items.length) % items.length;
+        while (items[newSel].kind === 'header' && newSel !== menuSel) {
+          newSel = (newSel - 1 + items.length) % items.length;
+        }
+        if (items[newSel].kind !== 'header') menuSel = newSel;
+      }
+      if ((down || gpDown) && !(prevMenuDown || prevGpDown)) {
+        let newSel = (menuSel + 1) % items.length;
+        while (items[newSel].kind === 'header' && newSel !== menuSel) {
+          newSel = (newSel + 1) % items.length;
+        }
+        if (items[newSel].kind !== 'header') menuSel = newSel;
+      }
       if ((enter || gpSelect) && !(prevMenuEnter || prevGpSelect)) { playMenuSelectSfx(); items[menuSel].action(); }
       if ((esc && !prevMenuEsc) || (gpBack && !prevGpBack)) {
         if (menuPage !== 'MAIN') { menuPage = 'MAIN'; menuSel = 0; playMenuSwitchSfx(); }
@@ -3886,6 +3925,7 @@ function drawMenuScreen(now){
 </script>
 
 <!-- NEO-VECTR ∞SNIP3 Module Systems -->
+<!-- Modules temporarily disabled - need proper integration to avoid conflicts
 <script src="./enhanced-menu.js"></script>
 <script src="./audio-control.js"></script>
 <script src="./audio-gui.js"></script>
@@ -3900,6 +3940,7 @@ function drawMenuScreen(now){
 <script src="./touch-controls.js"></script>
 <script src="./credits.js"></script>
 <script src="./platform-compatibility.js"></script>
+-->
 
 </body>
 </html>
