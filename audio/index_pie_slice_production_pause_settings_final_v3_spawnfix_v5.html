@@ -1,0 +1,3889 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>NEO-VECTR — Pure Code Prototype (HTML)</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; image-rendering: pixelated; }
+    #hud {
+      position: fixed; left: 10px; top: 10px; z-index: 10;
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      color: rgba(200,255,255,0.9);
+      user-select: none;
+      background: rgba(0,0,0,0.25);
+      padding: 8px 10px;
+      border: 1px solid rgba(120,255,255,0.12);
+      border-radius: 10px;
+      backdrop-filter: blur(4px);
+      max-width: min(580px, calc(100vw - 20px));
+    }
+    #hud .row { display:flex; gap:10px; flex-wrap: wrap; }
+    #hud kbd {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-bottom-color: rgba(255,255,255,0.18);
+      padding: 1px 6px;
+      border-radius: 6px;
+      color: rgba(255,255,255,0.9);
+    }
+    #log {
+      margin-top: 8px;
+      max-height: 180px;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: rgba(220,220,220,0.85);
+      border-top: 1px solid rgba(120,255,255,0.10);
+      padding-top: 8px;
+    }
+    #btns { margin-top: 8px; display:flex; gap:8px; flex-wrap: wrap; }
+    button {
+      font: inherit;
+      color: rgba(255,255,255,0.9);
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 6px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    button:hover { background: rgba(255,255,255,0.12); }
+    #touchHint { margin-top: 6px; color: rgba(255,170,255,0.85); }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div id="hud">
+    <div class="row" style="align-items:center; gap:10px">
+      <div><b>NEO-VECTR INC</b> — ∞SNIP3 pie-slice prototype (HTML)</div>
+      <div style="opacity:0.9">Players:
+        <select id="playerCount" style="margin-left:6px; font:inherit; color:rgba(255,255,255,0.9); background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12); padding:2px 6px; border-radius:8px;">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4" selected>4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div><kbd>WASD</kbd> move (P1)</div>
+      <div><kbd>Mouse</kbd> aim / fire (P1 ricochet)</div>
+      <div><kbd>Space</kbd> charge shot (P1)</div>
+      <div><kbd>Shift</kbd> boost (P1)</div>
+      <div><kbd>Gamepads</kbd> up to 4 players</div>
+      <div><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> quality</div>
+      <div><kbd>L</kbd> toggle log</div>
+    </div>
+    <div id="touchHint">Touch: left side move, right side aim (P1 only) • Other players: gamepads or idle drift</div>
+    <div id="audioStatus" style="margin-top:6px;color:rgba(180,220,255,0.85)"></div>
+    <div id="btns">
+      <button id="dlLog">Download log</button>
+      <button id="showPrev">Show previous</button>
+      <button id="clearLogs">Clear logs</button>
+    </div>
+    <div id="log"></div>
+    <div id="err" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,80,80,0.20);color:rgba(255,120,120,0.95);white-space:pre-wrap"></div>
+  </div>
+
+<script>
+
+// ===============================
+//  Audio Manager (seamless loops, gesture-gated)
+// ===============================
+
+// Pending audio play requests (flushed after first user gesture)
+let _pendingPlays = [];
+
+let AUDIO = {
+  ctx: null,
+  unlocked: false,
+  buffers: new Map(),
+  playing: new Map(),
+  masterGain: null,
+  ensureCtx(){
+    if (this.ctx) return this.ctx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    this.ctx = new AC();
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.value = 0.9;
+    this.masterGain.connect(this.ctx.destination);
+    return this.ctx;
+  },
+  async unlockFromUserGesture(){
+    try{
+      const ctx = this.ensureCtx();
+      if(!ctx) return false;
+      if (ctx.state !== 'running') await ctx.resume();
+      // tiny silent blip to fully unlock on iOS
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      g.gain.value = 0.0001;
+      o.connect(g); g.connect(this.masterGain);
+      o.start(); o.stop(ctx.currentTime + 0.02);
+      this.unlocked = true;
+      return true;
+    }catch(e){
+      this.unlocked = false;
+      return false;
+    }
+  },
+  async loadBuffer(key, urlList){
+    if(this.buffers.has(key)) return this.buffers.get(key);
+    const ctx = this.ensureCtx();
+    if(!ctx) return null;
+    for (const url of urlList){
+      try{
+        const res = await fetch(url, {cache:'no-store'});
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const ab = await res.arrayBuffer();
+        const buf = await ctx.decodeAudioData(ab.slice(0));
+        this.buffers.set(key, buf);
+        return buf;
+      }catch(e){
+        // keep trying
+      }
+    }
+    return null;
+  },
+  stop(key){
+    const s = this.playing.get(key);
+    if(s){
+      try{s.stop(0);}catch(_){ }
+      try{s.disconnect();}catch(_){ }
+      this.playing.delete(key);
+    }
+  },
+  playLoop(key, buf, {volume=1.0, startAt=0} = {}){
+    const ctx = this.ensureCtx();
+    if(!ctx || !buf || !this.unlocked) return null;
+    this.stop(key);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    const g = ctx.createGain();
+    g.gain.value = Math.max(0, Math.min(1.5, volume));
+    src.connect(g);
+    g.connect(this.masterGain);
+    src.start(0, startAt % Math.max(0.001, buf.duration));
+    this.playing.set(key, src);
+    return src;
+  }
+};
+
+function installAudioUnlockHooks(logFn){
+  const once = async (ev)=>{
+    window.removeEventListener('pointerdown', once, true);
+    window.removeEventListener('keydown', once, true);
+    const ok = await AUDIO.unlockFromUserGesture();
+    if(logFn) logFn(ok ? 'AUDIO: unlocked (user gesture)' : 'AUDIO: unlock failed');
+  };
+  window.addEventListener('pointerdown', once, true);
+  window.addEventListener('keydown', once, true);
+}
+(() => {
+  'use strict';
+
+  // ---------------------------
+  // Safety: storage + crash visibility
+  // ---------------------------
+  const errEl = document.getElementById('err');
+  function showError(text){
+    try {
+      if (!errEl) return;
+      errEl.style.display = 'block';
+      errEl.textContent = String(text);
+    } catch {}
+  }
+
+  window.addEventListener('error', (e) => {
+    const msg = (e && (e.message || e.error)) ? (e.message || String(e.error)) : 'Unknown error';
+    showError('JS Error: ' + msg + (e && e.filename ? ('\n' + e.filename + ':' + e.lineno + ':' + e.colno) : ''));
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    showError('Promise rejection: ' + (e && e.reason ? String(e.reason) : 'Unknown'));
+  });
+
+  const STORE = (() => {
+    const mem = new Map();
+    let ls = null;
+    try {
+      ls = window.localStorage;
+      const k = '__th_storage_test__';
+      ls.setItem(k, '1');
+      ls.removeItem(k);
+    } catch {
+      ls = null;
+    }
+    return {
+      ok: !!ls,
+      get(key){
+        try { if (ls) return ls.getItem(key); } catch {}
+        return mem.get(key) ?? null;
+      },
+      set(key, val){
+        try { if (ls) return ls.setItem(key, val); } catch {}
+        mem.set(key, val);
+      },
+      remove(key){
+        try { if (ls) return ls.removeItem(key); } catch {}
+        mem.delete(key);
+      }
+    };
+  })();
+
+  // ---------------------------
+  // Log rotation
+  // ---------------------------
+  const LS_LATEST = 'NEO-VECTR_log_latest';
+  const LS_PREV   = 'NEO-VECTR_log_previous';
+  const LS_META   = 'NEO-VECTR_log_meta';
+  const LS_SETTINGS = 'NEO-VECTR_settings_v1';
+  const settings = {
+    brightness: 0.00,      // -0.30..+0.30 (post-pass overlay)
+    musicVol: 0.70,        // 0..1
+    sfxVol: 0.85,          // 0..1
+    // NEW: Granular sound controls
+    sfxLaserFire: true,      // Your laser shots
+    sfxLaserRicochet: true,  // Bounce sounds
+    sfxBoost: true,          // Boost dash
+    sfxExplosions: true,      // Zap/boom
+    sfxMenu: true,            // Menu click/select
+    coop: false,
+    lobbyPrivate: false,
+    lobbyPassword: '',     // optional
+    snip3Hud: true,
+    seedStr: '',          // empty = auto
+    seedOverlay: true,    // show seed briefly at run start
+    debugOnMenu: true,    // show debug panel while in menus
+    debugHudVisible: true,   // NEW: Current HUD visibility state
+  };
+  // Back-compat alias (some subsystems reference SETTINGS)
+  const SETTINGS = settings;
+  window.SETTINGS = SETTINGS;
+
+
+
+  const prev = STORE.get(LS_LATEST);
+  if (prev) STORE.set(LS_PREV, prev);
+  STORE.remove(LS_LATEST);
+
+  const start = performance.now();
+  const runMeta = {
+    startedISO: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    platform: navigator.platform,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    devicePixelRatio: window.devicePixelRatio || 1,
+    version: 'proto-html-4p-1.1'
+  };
+
+  // ---------------------------
+  // Seeded RNG (Minecraft-style)
+  // One seed drives BOTH map + run deterministically.
+  // ---------------------------
+  function xmur3(str) {
+    let h = 1779033703 ^ str.length;
+    for (let i = 0; i < str.length; i++) {
+      h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+      h = (h << 13) | (h >>> 19);
+    }
+    return function() {
+      h = Math.imul(h ^ (h >>> 16), 2246822507);
+      h = Math.imul(h ^ (h >>> 13), 3266489909);
+      h ^= h >>> 16;
+      return h >>> 0;
+    };
+  }
+  function mulberry32(a) {
+    return function() {
+      let t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function normalizeSeed(s){
+    s = (s == null) ? '' : String(s);
+    s = s.trim();
+    // Keep empty = auto
+    return s;
+  }
+  function makeAutoSeed(){
+    // Short, copyable; stable per start.
+    const a = Date.now().toString(36);
+    const b = Math.floor(Math.random()*1e9).toString(36);
+    return (a + '-' + b).toUpperCase();
+  }
+
+  let currentSeed = '';
+  let seedT0 = 0;
+  let rand = () => Math.random();
+  function setSeed(seedStr){
+    currentSeed = normalizeSeed(seedStr);
+    const use = currentSeed || makeAutoSeed();
+    currentSeed = use;
+    const h = xmur3(use);
+    rand = mulberry32(h());
+    seedT0 = performance.now();
+    log('INFO', `SEED: ${currentSeed}`);
+    return currentSeed;
+  }
+  function randRange(a,b){ return a + (b-a)*rand(); }
+  function randSign(){ return rand() < 0.5 ? -1 : 1; }
+
+
+  STORE.set(LS_META, JSON.stringify(runMeta));
+
+  const logLines = [];
+  const logEl = document.getElementById('log');
+  let logVisible = true;
+
+  function log(level, msg){
+    const t = Math.floor(performance.now() - start);
+    const line = `[+${String(t).padStart(6,'0')}ms] ${level}: ${msg}`;
+    logLines.push(line);
+    if (logLines.length > 600) logLines.shift();
+    STORE.set(LS_LATEST, logLines.join('\n'));
+    if (logVisible) {
+      logEl.textContent = logLines.slice(-120).join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+
+  function logBanner(){
+    log('INFO', '==== NEO-VECTR (HTML) ====');
+    log('INFO', `Build: ${runMeta.version}`);
+    log('INFO', `Platform: ${runMeta.platform}`);
+    log('INFO', `TZ: ${runMeta.timezone}`);
+    log('INFO', `DPR: ${runMeta.devicePixelRatio}`);
+    log('INFO', `Logs: latest (this run) + previous (last run) via ${STORE.ok ? 'localStorage' : 'memory (storage blocked)'}`);
+    log('INFO', `Storage: ${STORE.ok ? 'localStorage' : 'memory-only'}`);
+    log('INFO', '===============================');
+  }
+  logBanner();
+
+  function saveSettings(){
+    try { STORE.set(LS_SETTINGS, JSON.stringify(settings)); } catch {}
+  }
+  function loadSettings(){
+    try {
+      const raw = STORE.get(LS_SETTINGS);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return;
+      // Merge known keys only (forward-safe).
+      for (const k of Object.keys(settings)) {
+        if (k in obj) settings[k] = obj[k];
+      }
+    } catch {}
+  }
+
+
+  document.getElementById('dlLog').addEventListener('click', () => {
+    let meta = {};
+    try { meta = JSON.parse(STORE.get(LS_META) || '{}'); } catch { meta = {}; }
+    const latest = STORE.get(LS_LATEST) || '';
+    const blob = new Blob([JSON.stringify(meta,null,2) + '\n\n' + latest], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `NEO-VECTR_latest_${(meta.startedISO||'run').replace(/[:.]/g,'-')}.log.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+
+  document.getElementById('showPrev').addEventListener('click', () => {
+    const p = STORE.get(LS_PREV);
+    if (!p) { log('WARN', 'No previous log found yet (run twice).'); return; }
+    const blob = new Blob([p], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'NEO-VECTR_previous.log.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+
+  document.getElementById('clearLogs').addEventListener('click', () => {
+    STORE.remove(LS_LATEST);
+    STORE.remove(LS_PREV);
+    STORE.remove(LS_META);
+    logLines.length = 0;
+    logBanner();
+
+    log('INFO', 'Cleared logs.');
+  });
+
+  window.addEventListener('keydown', (e) => {
+  // CAPSLOCK + SHIFT+TAB toggles debug HUD (hidden by default during gameplay).
+  if (e.code === 'Tab' && e.shiftKey && e.getModifierState && e.getModifierState('CapsLock')) {
+    setDebugVisible(!debugVisible);
+    settings.debugOnMenu = debugVisible;
+    saveSettings();
+    e.preventDefault();
+    return;
+  }
+    if (e.key === 'l' || e.key === 'L') {
+      logVisible = !logVisible;
+      logEl.style.display = logVisible ? 'block' : 'none';
+      log('INFO', `Log visibility: ${logVisible ? 'ON' : 'OFF'}`);
+    }
+  });
+
+  // ---------------------------
+  // Canvas setup
+  // ---------------------------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+
+  // ---------------------------
+  // App modes: BOOT → MENU → GAME
+  // ---------------------------
+  let appMode = 'BOOT_WAIT'; // BOOT_WAIT, BOOT, MENU, GAME, PAUSE, VICTORY
+  let bootT0 = 0;
+  const BOOT_MIN_DURATION_MS = 5200;
+  let bootFlash = 0;
+  let menuSel = 0;
+  let prevMenuSel = 0;
+  let menuClickDown = false;
+  let debugVisible = true;
+  function setDebugVisible(v){
+    debugVisible = !!v;
+    const hud = document.getElementById('hud');
+    if (hud) hud.style.display = debugVisible ? 'block' : 'none';
+    settings.debugHudVisible = debugVisible;
+    saveSettings(); // Persist state
+    log('INFO', `Debug HUD: ${debugVisible ? 'VISIBLE' : 'HIDDEN'}`);
+  }
+
+  // Initialize persisted settings (must occur after settings + setDebugVisible exist)
+  loadSettings();
+  // Restore debug HUD visibility from saved state
+  if (settings.hasOwnProperty('debugHudVisible')) {
+    setDebugVisible(settings.debugHudVisible);
+  } else {
+    setDebugVisible(true); // Default: visible
+  }
+  // Auto-hide after boot completes unless user enables debugOnMenu
+  let _bootAutoHideTimer = null;
+  function scheduleBootAutoHide(){
+    if(_bootAutoHideTimer) return;
+    _bootAutoHideTimer = setTimeout(()=>{ try{ if(!settings.debugOnMenu) setDebugVisible(false); }catch(e){} }, 2500);
+  }
+
+  let menuDragKey = null;
+  let prevMenuUp = false;
+  let prevMenuDown = false;
+  let prevMenuEnter = false;
+  let prevMenuLeft = false;
+  let prevMenuRight = false;
+  let prevMenuEsc = false;
+  let prevGpUp = false;
+  let prevGpDown = false;
+  let prevGpSelect = false;
+  let prevGpLeft = false;
+  let prevGpRight = false;
+  let prevGpBack = false;
+
+  // Pause overlay
+  let pauseSel = 0;
+  let pauseClickDown = false;
+  let pauseEnterT0 = 0;
+
+  // Game modes
+  let gameMode = 'VS'; // VS, SNIP3
+
+  // VS round state
+  let winnerId = -1;
+  let victoryTimer = 0;
+  let victoryEnterT0 = 0;
+
+  // Lobby overlay (Tab during gameplay)
+  let lobbyOverlayVisible = false;
+  let lobbyOverlayTimer = 0;
+  const LOBBY_OVERLAY_DURATION = 3.0; // seconds
+
+  // Menu animation timing
+  let menuEnterT0 = performance.now();
+  let menuPageEnterT0 = performance.now();
+
+  function goMenu(){
+    appMode = 'MENU';
+    menuPage = 'MAIN';
+    setDebugVisible(true);
+
+    menuEnterT0 = performance.now();
+    menuPageEnterT0 = menuEnterT0;
+    // Keep selection consistent with the mode we were in.
+    menuSel = (menuPage === 'MAIN' && gameMode === 'VS') ? 1 : 0;
+    prevMenuSel = menuSel;
+
+    // Ensure boot sound is not still playing.
+    try { if (bootAudioEl) bootAudioEl.pause(); } catch {}
+
+    // Start menu music once we arrive.
+    startMenuMusic();
+  }
+
+  // Simulated ping for local players (realistic 20-80ms range)
+  function getPlayerPing(playerId) {
+    // In real online game, this would query actual network latency
+    // For now, simulate based on player ID (deterministic)
+    const basePing = 25;
+    const variance = playerId * 7; // Slight variation per player
+    return basePing + variance + Math.floor(Math.random() * 15);
+  }
+
+  function showLobbyOverlay(){
+    if (appMode !== 'GAME') return; // Only in gameplay
+    lobbyOverlayVisible = true;
+    lobbyOverlayTimer = LOBBY_OVERLAY_DURATION;
+    log('INFO', 'Lobby overlay: SHOWN');
+  }
+
+  function hideLobbyOverlay(){
+    lobbyOverlayVisible = false;
+    log('INFO', 'Lobby overlay: HIDDEN');
+  }
+
+  function updateLobbyOverlay(dt){
+    if (!lobbyOverlayVisible) return;
+    
+    lobbyOverlayTimer -= dt;
+    if (lobbyOverlayTimer <= 0) {
+      hideLobbyOverlay();
+    }
+  }
+
+  // ∞ SNIP3 label animation: blink ∞, scramble, settle
+  function snip3MenuLabel(now){
+    const t = (now - menuEnterT0) / 1000;
+    const blinkDur = 0.65;
+    const scrambleDur = 1.25;
+
+    if (t < blinkDur) {
+      const on = (Math.floor(t * 6) % 2) === 0;
+      return on ? '∞' : '';
+    }
+
+    const tt = t - blinkDur;
+    if (tt < scrambleDur) {
+      const prog = tt / scrambleDur;
+      const target = '∞ SNIP3';
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      // progressively lock characters from left → right
+      const lockCount = Math.floor(target.length * Math.min(1, prog * 1.10));
+      let out = '';
+      for (let i = 0; i < target.length; i++) {
+        const ch = target[i];
+        if (i < lockCount || ch === ' ' || ch === '∞') {
+          out += ch;
+        } else {
+          // deterministic-ish jitter by time + index
+          const k = (Math.floor(tt * 30) + i * 17) % chars.length;
+          out += chars[k];
+        }
+      }
+      return out;
+    }
+
+    return '∞ SNIP3';
+  }
+
+  let qualityPreset = 2; // 1=low,2=default,3=high
+  function presetToInternalScale(p){
+    if (p === 1) return 0.75;
+    if (p === 3) return 1.25;
+    return 1.0;
+  }
+
+  function resize(){
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const scale = presetToInternalScale(qualityPreset);
+
+    const targetW = Math.floor(window.innerWidth * dpr * scale);
+    const targetH = Math.floor(window.innerHeight * dpr * scale);
+
+    canvas.width = Math.max(320, targetW);
+    canvas.height = Math.max(180, targetH);
+
+    canvas.style.width = '100vw';
+    canvas.style.height = '100vh';
+
+    log('INFO', `Resize: ${window.innerWidth}x${window.innerHeight} css, fb=${canvas.width}x${canvas.height}, preset=${qualityPreset}`);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '1') { qualityPreset = 1; resize(); }
+    if (e.key === '2') { qualityPreset = 2; resize(); }
+    if (e.key === '3') { qualityPreset = 3; resize(); }
+  });
+
+  // ---------------------------
+  // Math helpers
+  // ---------------------------
+  const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+  const len = (x,y) => Math.hypot(x,y);
+  const norm = (x,y) => {
+    const l = Math.hypot(x,y);
+    if (l < 1e-6) return {x:0,y:0,l:0};
+    return {x:x/l,y:y/l,l:l};
+  };
+  const TAU = Math.PI * 2;
+  function ang01(rad){
+    let a = rad % TAU;
+    if (a < 0) a += TAU;
+    return a;
+  }
+
+
+  // ---------------------------
+  // Neon tube lettering (NO FONTS)
+  // ---------------------------
+  // Tube glyphs are defined as polylines in a unit box (0..1).
+  // This keeps the look consistent with player neon geometry.
+
+  function _polyCircle(cx, cy, r, steps=14, start=0){
+    const pts = [];
+    for (let i=0;i<=steps;i++){
+      const a = start + (i/steps) * TAU;
+      pts.push([cx + Math.cos(a)*r, cy + Math.sin(a)*r]);
+    }
+    return pts;
+  }
+
+  const TUBE_GLYPHS = {
+    ' ': [],
+    '-': [ [[0.15,0.55],[0.85,0.55]] ],
+    'I': [ [[0.50,0.12],[0.50,0.88]], [[0.30,0.12],[0.70,0.12]], [[0.30,0.88],[0.70,0.88]] ],
+    'N': [ [[0.18,0.88],[0.18,0.12]], [[0.18,0.88],[0.82,0.12]], [[0.82,0.12],[0.82,0.88]] ],
+    'E': [ [[0.82,0.12],[0.18,0.12]], [[0.18,0.12],[0.18,0.88]], [[0.18,0.50],[0.70,0.50]], [[0.18,0.88],[0.82,0.88]] ],
+    'O': [ _polyCircle(0.5,0.5,0.38,18) ],
+    'C': [ [[0.78,0.20],[0.55,0.12],[0.30,0.20],[0.18,0.50],[0.30,0.80],[0.55,0.88],[0.78,0.80]] ],
+    'T': [ [[0.20,0.12],[0.80,0.12]], [[0.50,0.12],[0.50,0.88]] ],
+    'V': [ [[0.20,0.12],[0.50,0.88],[0.80,0.12]] ],
+    'R': [ [[0.18,0.88],[0.18,0.12]], [[0.18,0.12],[0.62,0.12],[0.78,0.28],[0.62,0.44],[0.18,0.44]], [[0.45,0.44],[0.82,0.88]] ],
+    'P': [ [[0.18,0.88],[0.18,0.12]], [[0.18,0.12],[0.62,0.12],[0.78,0.28],[0.62,0.44],[0.18,0.44]] ],
+    'S': [ [[0.78,0.22],[0.60,0.12],[0.32,0.18],[0.22,0.34],[0.36,0.50],[0.68,0.54],[0.80,0.70],[0.64,0.86],[0.30,0.82],[0.18,0.72]] ],
+    '3': [ [[0.28,0.18],[0.58,0.12],[0.78,0.26],[0.58,0.40],[0.78,0.54],[0.58,0.70],[0.28,0.86]] ],
+    '∞': [
+      // Two linked loops
+      [[0.18,0.50],[0.30,0.30],[0.50,0.30],[0.62,0.50],[0.50,0.70],[0.30,0.70],[0.18,0.50],[0.38,0.50],[0.50,0.30],[0.62,0.50],[0.70,0.70],[0.82,0.50],[0.70,0.30],[0.62,0.50],[0.50,0.70],[0.38,0.50]]
+    ],
+    // Added to prevent missing-title glyphs (CREDITS / SETTINGS)
+    'D': [
+      [[0.22,0.88],[0.22,0.12]],
+      [[0.22,0.12],[0.58,0.12],[0.78,0.28],[0.78,0.72],[0.58,0.88],[0.22,0.88]]
+    ],
+    'G': [
+      [[0.78,0.22],[0.58,0.12],[0.32,0.18],[0.22,0.34],[0.22,0.66],[0.32,0.82],[0.58,0.88],[0.78,0.78],[0.78,0.58],[0.58,0.58]]
+    ],
+  };
+
+  function drawTubePolyline(pts, x, y, s, color, power=1.0, innerColor=null){
+    if (!pts || pts.length < 2) return;
+    const now = performance.now()*0.001;
+    const wob = (Math.sin(now*3.0 + (x+y)*0.001) * 0.002);
+
+    // Stronger neon "breathing" + near-off flicker (Geometry-Wars-ish signage feel)
+    const pulse = 0.55 + 0.45*Math.sin(now*2.25 + (x+y)*0.004);
+    const flick = 0.70 + 0.30*Math.sin(now*13.0 + (x+y)*0.020) + 0.18*Math.sin(now*29.0 + (x+y)*0.055);
+    const rareDip = (Math.sin(now*7.7 + (x+y)*0.012) > 0.93) ? 0.22 : 1.0;
+
+    const dyn = clamp((0.10 + 0.90*pulse) * flick, 0.12, 1.20) * rareDip;
+    const pwr = clamp(power * dyn, 0.08, 1.25);
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Outer tube glow (purple shell)
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i=0;i<4;i++){
+      const a = (0.05 + 0.04*i) * pwr;
+      ctx.strokeStyle = color.replace('ALPHA', String(a));
+      ctx.lineWidth = (0.12 + i*0.16);
+      ctx.beginPath();
+      for (let j=0;j<pts.length;j++){
+        const px = pts[j][0] + wob;
+        const py = pts[j][1] + wob;
+        if (j==0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+
+    // Inner neon core (opaque-ish colored center) — this is what makes letters feel "filled"
+    const core = innerColor || `rgba(255,255,255,ALPHA)`;
+    ctx.globalCompositeOperation = 'lighter';
+
+    // Fat inner pass (color body)
+    ctx.strokeStyle = core.replace('ALPHA', String(0.18 + 0.82*pwr));
+    ctx.lineWidth = 0.14;
+    ctx.beginPath();
+    for (let j=0;j<pts.length;j++){
+      const px = pts[j][0] + wob;
+      const py = pts[j][1] + wob;
+      if (j==0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Hot center filament (tight bright line)
+    ctx.strokeStyle = `rgba(255,255,255,${0.20 + 0.80*pwr})`;
+    ctx.lineWidth = 0.07;
+    ctx.beginPath();
+    for (let j=0;j<pts.length;j++){
+      const px = pts[j][0] + wob;
+      const py = pts[j][1] + wob;
+      if (j==0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+
+
+  // Neon palette for multicolor inner tubes (inside the purple shell)
+  const TITLE_INNER_PALETTE = [
+    'rgba(0,255,255,ALPHA)',   // cyan
+    'rgba(255,220,0,ALPHA)',   // neon yellow
+    'rgba(0,255,140,ALPHA)',   // neon green
+    'rgba(255,80,220,ALPHA)',  // pink
+    'rgba(80,140,255,ALPHA)',  // blue
+    'rgba(255,120,40,ALPHA)',  // orange
+    'rgba(255,60,80,ALPHA)',   // red
+  ];
+
+  function drawTubeText(text, cx, cy, heightPx, colorRGBA='rgba(175,75,255,ALPHA)', power=1.0, letterSpace=0.22, innerPalette=null){
+    const s = heightPx;
+    const chars = String(text).toUpperCase().split('');
+    const sum = (arr)=>arr.reduce((a,b)=>a+b,0);
+    const widths = chars.map(ch => (ch === ' ' ? 0.55 : 1.0));
+    const totalUnits = sum(widths) + letterSpace*(chars.length-1);
+    const totalPx = totalUnits * s;
+    let x = cx - totalPx/2;
+    const y = cy - s/2;
+
+    // For multicolor fills we only advance the palette on visible glyphs
+    let colorStep = 0;
+
+    for (let i=0;i<chars.length;i++){
+      const ch = chars[i];
+      const polys = TUBE_GLYPHS[ch] || TUBE_GLYPHS[' '];
+      const w = widths[i] * s;
+
+      let inner = null;
+      if (innerPalette && ch !== ' ') {
+        inner = innerPalette[colorStep % innerPalette.length];
+        colorStep++;
+      }
+
+      for (const poly of polys){
+        drawTubePolyline(poly, x, y, s, colorRGBA, power, inner);
+      }
+      x += w + letterSpace*s;
+    }
+  }
+
+
+  // ---------------------------
+// Input (keyboard/mouse + touch twin-stick + gamepad)
+// ---------------------------
+const keys = new Set();
+
+// CapsLock tracking (some browsers can be flaky if we only check inside one chord)
+let capsLockOn = false;
+let prevTabHeld = false;
+
+function refreshCapsLock(e){
+  try{
+    capsLockOn = !!(e && e.getModifierState && e.getModifierState('CapsLock'));
+  }catch(_){
+    // ignore
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  refreshCapsLock(e);
+
+  // CapsLock + Tab toggles debug HUD (ONLY when CapsLock is ON)
+  const tabPressed = (e.key === 'Tab' || e.code === 'Tab');
+  
+  if (tabPressed && capsLockOn && !prevTabHeld) {
+    e.preventDefault(); // Prevent browser tab switching
+    setDebugVisible(!debugVisible);
+    settings.debugOnMenu = debugVisible;
+    saveSettings();
+    log('INFO', `Debug HUD: ${debugVisible ? 'ON' : 'OFF'} (CapsLock+Tab)`);
+    prevTabHeld = true;
+    return;
+  }
+  
+  // Tab WITHOUT CapsLock = Lobby overlay (handled separately)
+  if (tabPressed && !capsLockOn) {
+    e.preventDefault();
+    // Show lobby overlay (only in game)
+    showLobbyOverlay();
+    prevTabHeld = true;
+    return;
+  }
+
+  // Optional: pressing CapsLock itself logs the state once (useful on macOS)
+  if (e.key === 'CapsLock') {
+    log('INFO', `CapsLock: ${capsLockOn ? 'ON' : 'OFF'}`);
+  }
+
+  keys.add(e.code);
+}, { capture: true });
+
+window.addEventListener('keyup', (e) => {
+  refreshCapsLock(e);
+  const tabReleased = (e.key === 'Tab' || e.code === 'Tab');
+  if (tabReleased) {
+    prevTabHeld = false;
+    hideLobbyOverlay(); // Hide lobby when Tab released
+  }
+  keys.delete(e.code);
+}, { capture: true });
+
+  let mouseDown = false;
+  let prevMouseDown = false;
+  let prevP1GpFire = false;
+  window.addEventListener('mousedown', (e) => { if (e.button === 0) mouseDown = true; });
+  window.addEventListener('mouseup',   (e) => { if (e.button === 0) mouseDown = false; });
+  window.addEventListener('blur', () => { mouseDown = false; keys.clear(); });
+
+  let mouseX = 0, mouseY = 0;
+  let mouseMoved = false;
+  let lastMouseMoveX = 0, lastMouseMoveY = 0;
+  window.addEventListener('mousemove', (e) => {
+    mouseX = e.clientX; mouseY = e.clientY;
+    // Any real mouse movement re-snaps aim back to mouse.
+    if (e.movementX !== 0 || e.movementY !== 0 || mouseX !== lastMouseMoveX || mouseY !== lastMouseMoveY) {
+      mouseMoved = true;
+      lastMouseMoveX = mouseX;
+      lastMouseMoveY = mouseY;
+    }
+  });
+
+  // Aim mode: mouse by default; arrow keys temporarily override until the mouse moves again.
+  let aimMode = 'mouse'; // 'mouse' | 'arrows'
+  let aimAngle = 0;
+
+  // Touch twin-stick: P1 only
+  let touchMove = {active:false, id:null, startX:0,startY:0, x:0,y:0};
+  let touchAim  = {active:false, id:null, startX:0,startY:0, x:0,y:0};
+
+  function setTouchStick(stick, touch){
+    stick.active = true;
+    stick.id = touch.identifier;
+    stick.startX = touch.clientX;
+    stick.startY = touch.clientY;
+    stick.x = touch.clientX;
+    stick.y = touch.clientY;
+  }
+  function updateTouchStick(stick, touch){ stick.x = touch.clientX; stick.y = touch.clientY; }
+  function releaseTouchStick(stick){ stick.active = false; stick.id = null; }
+
+  window.addEventListener('touchstart', (e) => {
+    for (const t of e.changedTouches) {
+      const isLeft = t.clientX < window.innerWidth * 0.5;
+      if (isLeft && !touchMove.active) { setTouchStick(touchMove, t); log('INFO','Touch move stick start'); }
+      else if (!isLeft && !touchAim.active) { setTouchStick(touchAim, t); log('INFO','Touch aim stick start'); }
+    }
+  }, {passive:true});
+
+  window.addEventListener('touchmove', (e) => {
+    for (const t of e.changedTouches) {
+      if (touchMove.active && t.identifier === touchMove.id) updateTouchStick(touchMove, t);
+      if (touchAim.active  && t.identifier === touchAim.id)  updateTouchStick(touchAim,  t);
+    }
+  }, {passive:true});
+
+  window.addEventListener('touchend', (e) => {
+    for (const t of e.changedTouches) {
+      if (touchMove.active && t.identifier === touchMove.id) { releaseTouchStick(touchMove); log('INFO','Touch move stick end'); }
+      if (touchAim.active  && t.identifier === touchAim.id)  { releaseTouchStick(touchAim);  log('INFO','Touch aim stick end'); }
+    }
+  }, {passive:true});
+
+  window.addEventListener('touchcancel', (e) => {
+    for (const t of e.changedTouches) {
+      if (touchMove.active && t.identifier === touchMove.id) releaseTouchStick(touchMove);
+      if (touchAim.active  && t.identifier === touchAim.id)  releaseTouchStick(touchAim);
+    }
+  }, {passive:true});
+
+  function getConnectedGamepads(){
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const out = [];
+    for (let i=0;i<pads.length;i++) {
+      const p = pads[i];
+      if (p && p.connected) out.push({ index:i, pad:p });
+    }
+    return out;
+  }
+
+  // ---------------------------
+  // Arena
+  // ---------------------------
+  function arena(){
+    const r = Math.min(canvas.width, canvas.height) * 0.42;
+    return { cx: canvas.width*0.5, cy: canvas.height*0.5, r: r };
+  }
+
+
+  function fbFromClient(clientX, clientY){
+    const r = canvas.getBoundingClientRect();
+    const nx = (clientX - r.left) / (r.width || 1);
+    const ny = (clientY - r.top) / (r.height || 1);
+    return {
+      x: nx * canvas.width,
+      y: ny * canvas.height
+    };
+  }
+
+
+  function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+
+  function applyBrightnessPass(){
+    // Lightweight global brightness (post-pass). Avoids touching all draw calls.
+    const b = Math.max(-0.30, Math.min(0.30, settings.brightness || 0));
+    if (Math.abs(b) < 0.001) return;
+    ctx.globalCompositeOperation = 'source-over';
+    const a = Math.min(0.35, Math.abs(b));
+    ctx.fillStyle = (b < 0) ? `rgba(0,0,0,${a})` : `rgba(255,255,255,${a})`;
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+  }
+
+  // ---------------------------
+  // Players (pie slices) — configurable count (1..8)
+  // ---------------------------
+  let playerCount = 4;
+
+
+  // ---------------------------
+  // User settings (pre-level)
+  // ---------------------------
+
+  let menuPage = 'MAIN'; // MAIN, VS_PRE, VS_CUSTOM, SETTINGS, CREDITS
+  const PLAYER_COLORS = [
+    { name: 'Green',  r: 80,  g: 255, b: 140 },
+    { name: 'Blue',   r: 80,  g: 180, b: 255 },
+    { name: 'Purple', r: 175, g: 75,  b: 255 }, // Saints Row-ish purple
+    { name: 'Red',    r: 255, g: 90,  b: 90  },
+    { name: 'Cyan',   r: 80,  g: 255, b: 255 },
+    { name: 'Orange', r: 255, g: 165, b: 80  },
+    { name: 'Lime',   r: 190, g: 255, b: 80  },
+    { name: 'Magenta',r: 255, g: 90,  b: 230 },
+  ];
+  // Back-compat alias used by older code paths
+  const COLORS = PLAYER_COLORS;
+
+  function colorForIndex(i){
+    return PLAYER_COLORS[i % PLAYER_COLORS.length];
+  }
+
+  const players = [];
+
+  // One interior barrier per slice (kept lightweight + deterministic)
+  // Barriers are simple chord segments inside each slice so the arena always has
+  // at least one interesting ricochet / line-of-sight break per player.
+  const barriers = [];
+
+  function initBarriers(){
+    barriers.length = 0;
+    const a = arena();
+
+    // Seeded barrier profile (depends on currentSeed + playerCount)
+    // Keep lightweight: one chord per slice.
+    const baseR = a.r * randRange(0.52, 0.62);
+    const rot = randRange(0, TAU); // rotation inside the slice
+    for (let i=0;i<playerCount;i++){
+      const angMin = (TAU * i) / playerCount;
+      const angMax = (TAU * (i+1)) / playerCount;
+      const mid = (angMin + angMax) * 0.5 + (rot * 0.06 * randSign());
+      const span = (angMax - angMin);
+
+      const delta = span * randRange(0.16, 0.28);
+      const r = baseR * randRange(0.92, 1.06);
+
+      const a0 = mid - delta;
+      const a1 = mid + delta;
+      const x0 = a.cx + Math.cos(a0)*r;
+      const y0 = a.cy + Math.sin(a0)*r;
+      const x1 = a.cx + Math.cos(a1)*r;
+      const y1 = a.cy + Math.sin(a1)*r;
+
+      // store center distance for spawn safety
+      barriers.push({ slice:i, x0,y0,x1,y1, r });
+    }
+  }
+
+  function initPlayers(){
+    players.length = 0;
+
+    // Deterministic spawn planner:
+    // - stays inside each slice with angular margins
+    // - spawns OUTSIDE the interior barrier (so players don't insta-kill)
+    // - enforces minimum separation; falls back to evenly spaced if needed
+    const a = arena;
+    const sliceA0 = -Math.PI/2;
+    const sliceW  = TAU / Math.max(1, playerCount);
+
+    const minSep = a.r * 0.16;          // tuned for 8-way melee without overlap
+    const angMargin = Math.min(sliceW * 0.18, 0.30); // keep away from slice borders
+    const rMin = a.r * 0.54;
+    const rMax = a.r * 0.80;
+
+    function barrierMidRFor(i){
+      if (!barriers || !barriers[i]) return a.r*0.38;
+      const b = barriers[i];
+      const mx = (b.ax + b.bx) * 0.5;
+      const my = (b.ay + b.by) * 0.5;
+      return Math.hypot(mx, my);
+    }
+
+    function trySpawn(i, attempts){
+      const baseAngMin = sliceA0 + i*sliceW + angMargin;
+      const baseAngMax = sliceA0 + (i+1)*sliceW - angMargin;
+
+      // push spawns outside the barrier for this slice
+      const bMidR = barrierMidRFor(i);
+      const spawnRMin = clamp(bMidR + a.r*0.14, rMin, rMax);
+
+      for (let k=0;k<attempts;k++){
+        const ang = randRange(baseAngMin, baseAngMax);
+        // slightly vary radius but keep outside barrier
+        const rr  = randRange(spawnRMin, rMax);
+        const x = Math.cos(ang)*rr;
+        const y = Math.sin(ang)*rr;
+
+        // keep away from center line (helps "spawn behind barrier" feeling)
+        if (rr < spawnRMin) continue;
+
+        // separation check
+        let ok = true;
+        for (let p=0;p<players.length;p++){
+          const dx = x - players[p].x;
+          const dy = y - players[p].y;
+          if (dx*dx + dy*dy < minSep*minSep){ ok=false; break; }
+        }
+        if (ok) return {x,y,ang,rr};
+      }
+      return null;
+    }
+
+    for (let i=0;i<playerCount;i++){
+      const mid = sliceA0 + (i+0.5)*sliceW;
+
+      // attempt a "smart" spawn first, then degrade gracefully
+      const s = trySpawn(i, 28) || trySpawn(i, 8) || {x:Math.cos(mid)*a.r*0.66, y:Math.sin(mid)*a.r*0.66, ang:mid, rr:a.r*0.66};
+
+      // tiny seeded jitter (keeps it from looking stamped, but still deterministic)
+      const jA = randRange(-sliceW*0.03, sliceW*0.03);
+      const jR = randRange(-a.r*0.008, a.r*0.008);
+      const ang = s.ang + jA;
+      const rr  = clamp(s.rr + jR, rMin, rMax);
+      const x = Math.cos(ang)*rr;
+      const y = Math.sin(ang)*rr;
+
+      const col = COLORS[i % COLORS.length];
+
+      players.push({
+        id: i+1,
+        name: `P${i+1}`,
+        color: col,
+        x, y,
+        vx: 0, vy: 0,
+        ang,
+        alive: true,
+        score: 0,
+        lives: 3,
+        cooldown: 0,
+        charge: 0,
+        boost: 0,
+        lastMoveX: Math.cos(ang),
+        lastMoveY: Math.sin(ang),
+      });
+    }
+
+    log('INFO', `Initialized ${playerCount} player(s) + slices. Seed=${SETTINGS.seedStr}`);
+  }
+
+  // ---------------------------
+  // Neon drawing primitives
+  // ---------------------------
+  function neonLine(x0,y0,x1,y1, coreW, haloW, coreA, haloA, color){
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${haloA})`;
+    ctx.lineWidth = haloW;
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+
+    ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${coreA})`;
+    ctx.lineWidth = coreW;
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+  }
+
+  function neonPoly(points, coreW, haloW, coreA, haloA, color){
+    for (let i=0;i<points.length;i++){
+      const a = points[i];
+      const b = points[(i+1)%points.length];
+      neonLine(a.x,a.y,b.x,b.y, coreW, haloW, coreA, haloA, color);
+    }
+  }
+
+  function drawCrosshair(){
+    const c = {r:120,g:255,b:255};
+    const cx = canvas.width*0.5, cy = canvas.height*0.5;
+    neonLine(0,cy, canvas.width,cy, 1.6, 8.0, 0.20, 0.05, c);
+    neonLine(cx,0, cx,canvas.height, 1.6, 8.0, 0.20, 0.05, c);
+  }
+
+  function drawArenaRing(){
+    const a = arena();
+    const c = {r:120,g:255,b:255};
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.beginPath();
+    ctx.arc(a.cx,a.cy,a.r,0,Math.PI*2);
+    ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},${0.06})`;
+    ctx.lineWidth = 10;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(a.cx,a.cy,a.r,0,Math.PI*2);
+    ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},${0.14})`;
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+  }
+
+  function drawPlayerSlices(){
+    const a = arena();
+
+    // soft fill wedges (subtle)
+    for (const p of players){
+      const j = (p.id === 0) ? sliceShakeAng : 0;
+      const a0 = p.angMin + j;
+      const a1 = p.angMax + j;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath();
+      ctx.moveTo(a.cx, a.cy);
+      ctx.arc(a.cx, a.cy, a.r * 0.985, a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${p.color.r},${p.color.g},${p.color.b},0.028)`;
+      ctx.fill();
+    }
+
+    // wedge boundary lines
+    for (const p of players){
+      const j = (p.id === 0) ? sliceShakeAng : 0;
+      const a0 = p.angMin + j;
+      const c = p.color;
+      const x0 = a.cx + Math.cos(a0)*a.r;
+      const y0 = a.cy + Math.sin(a0)*a.r;
+      neonLine(a.cx,a.cy, x0,y0, 1.3, 7.0, 0.22, 0.06, c);
+    }
+
+    // outer slice arcs (color-coded)
+    for (const p of players){
+      const j = (p.id === 0) ? sliceShakeAng : 0;
+      const a0 = p.angMin + j;
+      const a1 = p.angMax + j;
+      const c = p.color;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath();
+      ctx.arc(a.cx, a.cy, a.r, a0, a1);
+      ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},0.14)`;
+      ctx.lineWidth = 2.0;
+      ctx.stroke();
+    }
+  }
+
+  function drawBarriers(){
+    if (!barriers.length) return;
+    for (const B of barriers){
+      const c = colorForIndex(B.slice);
+      neonLine(B.x0,B.y0,B.x1,B.y1, 2.0, 10.0, 0.65, 0.12, c);
+    }
+  }
+
+  function drawPlayerTrail(p){
+    const tr = p.trail;
+    if (tr.length < 2) return;
+    for (let i=1;i<tr.length;i++){
+      const p0 = tr[i-1], p1 = tr[i];
+      const t = i / (tr.length-1);
+      const aCore = 0.44 * t;
+      const aHalo = 0.10 * t;
+      neonLine(p0.x,p0.y,p1.x,p1.y, 2.0, 10.0, aCore, aHalo, p.color);
+    }
+  }
+
+  // ---------------------------
+  // P1-only systems kept (charge/boost/lasers/sfx)
+  // ---------------------------
+  // Projectiles (yellow lasers)
+  const lasers = [];
+  let shootCooldown = 0;
+  const LASER_COOLDOWN = 0.09;
+  const LASER_RADIUS = 2.2;
+
+  // ---------------------------
+  // Audio files
+  // Expected to live beside this HTML (same folder).
+  // ---------------------------
+  const RICOCHET_SOUND_SRC = 'laser-45816.mp3';
+  const SHOOT_SOUND_SRC    = 'laser-gun-81720.mp3';
+  const BOOST_SOUND_SRC    = 'rayo-laser-101851.mp3';
+  const ZAP_SOUND_SRC      = 'laser-zap-2-90669.mp3';
+
+  // Menu SFX
+  const MENU_SWITCH_SOUND_SRC = 'menuoptionswitchingsound.mp3';
+  const MENU_SELECT_SOUND_SRC = 'MenuOptionSelectSound.mp3';
+
+  // Neo‑VECTR™ INC boot splash sound
+  const BOOT_SOUND_SRC     = 'the-moses-laser-cannon-182841.mp3';
+
+  // Main menu music (requested)
+  // NOTE: users sometimes name it with a prefix; we try both.
+  const MENU_MUSIC_SRC_PRIMARY   = 'menu-53679.mp3';
+  const MENU_MUSIC_SRC_FALLBACK  = '53679.mp3';
+
+  // Audio debug state (shown in the HUD/log)
+  const audioDbg = {
+    boot: { src: BOOT_SOUND_SRC, state: 'idle', dur: 0, t: 0, err: '' },
+    menu: { src: MENU_MUSIC_SRC_PRIMARY, state: 'idle', dur: 0, t: 0, err: '' },
+  };
+
+  // Boot visualizer (WebAudio analyser)
+  let bootCtx = null;
+  let bootAnalyser = null;
+  let bootMediaSrc = null;
+  let bootFreq = null;
+  let bootTime = null;
+  let bootEnergy = 0;
+  let bootEnergySm = 0;
+  let bootBeat = 0;
+  let bootBeatHold = 0;
+  let bootAudioEl = null;
+  let menuMusicEl = null;
+
+  function wireAudioDebug(el, which){
+    const dbg = audioDbg[which];
+    if (!dbg || !el) return;
+    const setState = (s) => { dbg.state = s; dbg.err = ''; };
+    el.addEventListener('loadstart', () => setState('loading'));
+    el.addEventListener('loadedmetadata', () => { dbg.dur = Number.isFinite(el.duration) ? el.duration : 0; });
+    el.addEventListener('canplay', () => setState(dbg.state === 'playing' ? 'playing' : 'ready'));
+    el.addEventListener('playing', () => setState('playing'));
+    el.addEventListener('pause', () => { if (!el.ended) setState('paused'); });
+    el.addEventListener('ended', () => setState('ended'));
+    el.addEventListener('error', () => {
+      dbg.state = 'error';
+      const me = el.error;
+      dbg.err = me ? `${me.code||''} ${me.message||''}`.trim() : 'error';
+    });
+  }
+
+  // Robust play helper: retries + state tracking so critical sounds can't silently fail.
+  function playWithRetry(el, label, opts){
+    // Bullet-proof play helper:
+    // - Never spams autoplay-rejected attempts
+    // - Leaves a clear log + status state
+    // - Retries only when it *can* succeed (after user gesture unlock)
+    const tag = `[${label}]`;
+    const maxAttempts = Math.max(1, (opts && opts.maxAttempts) || 3);
+    const delayMs = (opts && opts.delayMs) || 180;
+    const dbg = (opts && opts.dbg) || null;
+
+    if (!el) {
+      log('WARN', `${tag} missing element`);
+      if (dbg){ dbg.state='error'; dbg.err='missing element'; }
+      return { ok:false, reason:'missing' };
+    }
+
+    // Queue this play request if we don't have an unlocked audio context yet.
+    // We will drain the queue after the first user gesture.
+    if (!_audioUnlocked) {
+      if (dbg){ dbg.state='blocked'; dbg.err='awaiting user gesture'; }
+      log('WARN', `${tag} awaiting user gesture to enable audio`);
+      _pendingPlays.push(() => playWithRetry(el, label, opts));
+      return { ok:false, reason:'needs_gesture' };
+    }
+
+    let attempt = 0;
+    let done = false;
+
+    const tryOnce = () => {
+      if (done) return;
+      attempt += 1;
+      try {
+        const p = el.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            done = true;
+            if (dbg){ dbg.state='playing'; dbg.err=''; }
+            log('INFO', `${tag} playing`);
+          }).catch((err) => {
+            const msg = String(err && (err.name || err.message) || err);
+            if (dbg){ dbg.state='error'; dbg.err=msg.slice(0,140); }
+
+            // If autoplay is still blocked somehow, don't spin retries.
+            if (String(msg).includes('NotAllowedError')) {
+              log('WARN', `${tag} play blocked (gesture required): ${msg}`);
+              _pendingPlays.push(() => playWithRetry(el, label, opts));
+              return;
+            }
+
+            if (attempt < maxAttempts) {
+              setTimeout(tryOnce, delayMs);
+            } else {
+              log('WARN', `${tag} play failed after ${attempt} attempts: ${msg}`);
+            }
+          });
+        } else {
+          // Some browsers return void.
+          done = true;
+          if (dbg){ dbg.state='playing'; dbg.err=''; }
+          log('INFO', `${tag} playing (void promise)`);
+        }
+      } catch (e) {
+        const msg = String(e && (e.name || e.message) || e);
+        if (dbg){ dbg.state='error'; dbg.err=msg.slice(0,140); }
+        if (String(msg).includes('NotAllowedError')) {
+          log('WARN', `${tag} play blocked (gesture required): ${msg}`);
+          _pendingPlays.push(() => playWithRetry(el, label, opts));
+          return;
+        }
+        if (attempt < maxAttempts) setTimeout(tryOnce, delayMs);
+      }
+    };
+
+    // If it isn't ready yet, canplay will often fix first-play ordering.
+    const onCanPlay = () => {
+      el.removeEventListener('canplay', onCanPlay);
+      if (el.paused && !done && attempt < maxAttempts) setTimeout(tryOnce, 0);
+    };
+    el.addEventListener('canplay', onCanPlay);
+
+    tryOnce();
+    return { ok:true, reason:'attempted' };
+  }
+
+
+const audioStatusEl = document.getElementById('audioStatus');
+  function fmtTime(sec){
+    if (!Number.isFinite(sec) || sec <= 0) return '0:00';
+    const s = Math.max(0, sec);
+    const m = Math.floor(s/60);
+    const r = Math.floor(s - m*60);
+    return `${m}:${String(r).padStart(2,'0')}`;
+  }
+  function updateAudioStatus(){
+    // Update times
+    if (bootAudioEl) audioDbg.boot.t = bootAudioEl.currentTime || 0;
+    if (menuMusicEl) audioDbg.menu.t = menuMusicEl.currentTime || 0;
+
+    if (!audioStatusEl) return;
+    const b = audioDbg.boot;
+    const m = audioDbg.menu;
+    const bRem = (b.dur && b.dur > 0) ? Math.max(0, b.dur - b.t) : 0;
+    const mRem = (m.dur && m.dur > 0) ? Math.max(0, m.dur - m.t) : 0;
+
+    // Keep it compact; you can see exact events in the log.
+    audioStatusEl.innerHTML =
+      `<b>SNIP3 TELEMETRY</b> • unlocked: ${_audioUnlocked ? 'yes' : 'no'}<br>` +
+      `BOOT: <span style="opacity:0.95">${b.state}</span><br>` +
+      `MENU: <span style="opacity:0.95">${m.state}</span>` +
+      (m.err ? ` • <span style="color:rgba(255,160,160,0.95)">${String(m.err).slice(0,80)}</span>` : '');
+  }
+
+  function startMenuMusic(){
+    if (!_audioUnlocked) return;
+    if (!menuMusicEl) {
+      // Try primary name first, then fallback.
+      menuMusicEl = new Audio(MENU_MUSIC_SRC_PRIMARY);
+      menuMusicEl.preload = 'auto';
+      menuMusicEl.loop = true;
+      menuMusicEl.volume = Math.max(0, Math.min(1, (settings.musicVol ?? 0.70)));
+      audioDbg.menu.src = MENU_MUSIC_SRC_PRIMARY;
+      wireAudioDebug(menuMusicEl, 'menu');
+      menuMusicEl.addEventListener('error', () => {
+        // If primary fails, attempt fallback once.
+        if (menuMusicEl && menuMusicEl.src && menuMusicEl.src.includes(MENU_MUSIC_SRC_PRIMARY)) {
+          log('WARN', `Menu music failed to load: ${MENU_MUSIC_SRC_PRIMARY} (trying ${MENU_MUSIC_SRC_FALLBACK})`);
+          try {
+            const t = menuMusicEl.currentTime || 0;
+            menuMusicEl.src = MENU_MUSIC_SRC_FALLBACK;
+            menuMusicEl.volume = Math.max(0, Math.min(1, settings.musicVol ?? 0.70));
+            audioDbg.menu.src = MENU_MUSIC_SRC_FALLBACK;
+            menuMusicEl.load();
+            // keep loop/volume
+            menuMusicEl.currentTime = Math.min(t, 0);
+          } catch {}
+        } else {
+          log('WARN', `Menu music failed to load: ${MENU_MUSIC_SRC_FALLBACK} (put it beside index.html)`);
+        }
+      });
+    }
+    try {
+      if (menuMusicEl.paused) {
+        menuMusicEl.currentTime = 0;
+        playWithRetry(menuMusicEl, 'menu', { attempts: 8, delayMs: 140, tag: 'MENU_MUSIC' });
+      }
+    } catch {}
+  }
+
+  function stopMenuMusic(){
+    if (!menuMusicEl) return;
+    try { menuMusicEl.pause(); } catch {}
+  }
+
+  const _ricPool = [];
+  const _shootPool = [];
+  const _boostPool = [];
+  const _zapPool = [];
+  const _RICOCHET_POOL_N = 8;
+  const _SHOOT_POOL_N = 10;
+  const _BOOST_POOL_N = 6;
+  const _ZAP_POOL_N = 8;
+
+
+  // Menu pools
+  const _menuSwitchPool = [];
+  const _menuSelectPool = [];
+  const _MENU_SWITCH_POOL_N = 6;
+  const _MENU_SELECT_POOL_N = 4;
+  let _menuSwitchIdx = 0;
+  let _menuSelectIdx = 0;
+  let _menuSfxLastT = 0;
+  const _MENU_SFX_DEBOUNCE_MS = 55;
+  let _ricIdx = 0;
+  let _shootIdx = 0;
+  let _boostIdx = 0;
+  let _zapIdx = 0;
+  let _audioUnlocked = false;
+
+  function initSfxPools(){
+    if (_ricPool.length || _shootPool.length || _boostPool.length || _zapPool.length || _menuSwitchPool.length || _menuSelectPool.length) return;
+
+    const sfx = Math.max(0, Math.min(1, settings.sfxVol ?? 0.85));
+
+    const mk = (src, vol) => {
+      const a = new Audio(src);
+      a.preload = 'auto';
+      a.volume = Math.max(0, Math.min(1, vol * sfx));
+      return a;
+    };
+
+    for (let i=0;i<_RICOCHET_POOL_N;i++) _ricPool.push(mk(RICOCHET_SOUND_SRC, 0.60));
+    for (let i=0;i<_SHOOT_POOL_N;i++)    _shootPool.push(mk(SHOOT_SOUND_SRC,    0.55));
+    for (let i=0;i<_BOOST_POOL_N;i++)    _boostPool.push(mk(BOOST_SOUND_SRC,    0.65));
+    for (let i=0;i<_ZAP_POOL_N;i++)      _zapPool.push(mk(ZAP_SOUND_SRC,        0.70));
+
+    for (let i=0;i<_MENU_SWITCH_POOL_N;i++) _menuSwitchPool.push(mk(MENU_SWITCH_SOUND_SRC, 0.55));
+    for (let i=0;i<_MENU_SELECT_POOL_N;i++) _menuSelectPool.push(mk(MENU_SELECT_SOUND_SRC, 0.60));
+  }
+
+  function refreshSfxVolumes(){
+    const sfx = Math.max(0, Math.min(1, settings.sfxVol ?? 0.85));
+    const setPool = (pool, base) => { for (const a of pool) { try { a.volume = Math.max(0, Math.min(1, base * sfx)); } catch {} } };
+    setPool(_ricPool, 0.60);
+    setPool(_shootPool, 0.55);
+    setPool(_boostPool, 0.65);
+    setPool(_zapPool, 0.70);
+    setPool(_menuSwitchPool, 0.55);
+    setPool(_menuSelectPool, 0.60);
+  }
+
+  function unlockAudio(){
+    if (_audioUnlocked) return;
+    _audioUnlocked = true;
+      // Drain any play requests that were blocked by autoplay policies.
+      try {
+        while (_pendingPlays.length) {
+          const fn = _pendingPlays.shift();
+          if (typeof fn === 'function') fn();
+        }
+      } catch(e){ /* ignore */ }
+    initSfxPools();
+
+    const warm = (a) => {
+      try {
+        const p = a.play();
+        if (p && p.then) p.then(()=>{ a.pause(); a.currentTime = 0; }).catch(()=>{});
+        else { a.pause(); a.currentTime = 0; }
+      } catch {}
+    };
+    if (_ricPool[0]) warm(_ricPool[0]);
+    if (_shootPool[0]) warm(_shootPool[0]);
+    if (_boostPool[0]) warm(_boostPool[0]);
+    if (_zapPool[0]) warm(_zapPool[0]);
+    if (_menuSwitchPool[0]) warm(_menuSwitchPool[0]);
+    if (_menuSelectPool[0]) warm(_menuSelectPool[0]);
+    log('INFO','SNIP3 unlocked');
+  }
+
+  
+  function startBoot(){
+    if (appMode !== 'BOOT_WAIT') return;
+    appMode = 'BOOT';
+    bootT0 = performance.now();
+    bootFlash = 0;
+
+    try {
+      if (!bootAudioEl) {
+        bootAudioEl = new Audio(BOOT_SOUND_SRC);
+        bootAudioEl.preload = 'auto';
+        bootAudioEl.loop = false;
+        bootAudioEl.volume = Math.max(0, Math.min(1, settings.sfxVol ?? 0.85));
+        audioDbg.boot.src = BOOT_SOUND_SRC;
+        wireAudioDebug(bootAudioEl, 'boot');
+      }
+
+      // Always play boot sound directly from the media element.
+      // (WebAudio routing can be silent if an AudioContext is suspended.)
+      try { bootAudioEl.pause(); } catch {}
+      try { bootAudioEl.currentTime = 0; } catch {}
+      playWithRetry(bootAudioEl, 'boot', { attempts: 10, delayMs: 120, tag: 'MOSES_BOOT' });
+
+      // If it ends, go to menu.
+      bootAudioEl.onended = () => {
+        // Don't snap out instantly; keep the power-up on-screen long enough to read.
+        const dt = performance.now() - bootT0;
+        if (appMode === 'BOOT' && dt >= BOOT_MIN_DURATION_MS) goMenu();
+        else if (appMode === 'BOOT') setTimeout(()=>{ if(appMode==='BOOT') goMenu(); }, Math.max(0, BOOT_MIN_DURATION_MS - dt));
+      };
+
+      // Fail-safe: if something weird happens (metadata never loads, etc), still progress.
+      // IMPORTANT: do not cut the boot sound short. Prefer duration-based timing.
+      let fallbackMs = Math.max(20000, BOOT_MIN_DURATION_MS + 2000);
+      let bootFailSafeTid = 0;
+      const armFailSafe = () => {
+        // If duration is known, wait for it (plus a small buffer).
+        const dur = Number(bootAudioEl.duration);
+        if (isFinite(dur) && dur > 0) {
+          fallbackMs = Math.max(fallbackMs, Math.round(dur * 1000) + 750);
+        }
+        if (bootFailSafeTid) clearTimeout(bootFailSafeTid);
+        bootFailSafeTid = setTimeout(() => { if (appMode === 'BOOT') goMenu(); }, fallbackMs);
+      };
+      // If metadata arrives, arm a better fail-safe; otherwise arm immediately with a generous max.
+      bootAudioEl.onloadedmetadata = () => { try { armFailSafe(); } catch {} };
+      try { armFailSafe(); } catch {}
+    } catch (e) {
+      setTimeout(() => { if (appMode === 'BOOT') goMenu(); }, 1800);
+    }
+  }
+
+  let _firstInteractionDone = false;
+  function firstInteraction(){
+    if (_firstInteractionDone) return;
+    _firstInteractionDone = true;
+    unlockAudio();
+    startBoot();
+  }
+
+  // "Press anything" support: mouse/touch + keyboard + controller.
+  window.addEventListener('pointerdown', firstInteraction, { once:true });
+  window.addEventListener('keydown', firstInteraction, { once:true });
+
+  function anyGamepadPressed(){
+    const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
+    for (const gp of pads) {
+      if (!gp || !gp.buttons) continue;
+      for (const b of gp.buttons) {
+        if (b && b.pressed) return true;
+      }
+    }
+    return false;
+  }
+
+  function playRicochetSfx(){
+    if (!_audioUnlocked || !settings.sfxLaserRicochet) return; // Check setting
+    initSfxPools();
+    const a = _ricPool[_ricIdx++ % _ricPool.length];
+    try { 
+      a.volume = Math.max(0, Math.min(1, 0.60 * (settings.sfxVol || 0.85))); // Apply master SFX vol
+      a.pause(); 
+      a.currentTime = 0; 
+      a.play().catch(()=>{}); 
+    } catch {}
+  }
+  function playShootSfx(){
+    if (!_audioUnlocked || !settings.sfxLaserFire) return; // Check setting
+    initSfxPools();
+    const a = _shootPool[_shootIdx++ % _shootPool.length];
+    try { 
+      a.volume = Math.max(0, Math.min(1, 0.55 * (settings.sfxVol || 0.85)));
+      a.pause(); 
+      a.currentTime = 0; 
+      a.play().catch(()=>{}); 
+    } catch {}
+  }
+  function playBoostSfx(){
+    if (!_audioUnlocked || !settings.sfxBoost) return; // Check setting
+    initSfxPools();
+    const a = _boostPool[_boostIdx++ % _boostPool.length];
+    try { 
+      a.volume = Math.max(0, Math.min(1, 0.65 * (settings.sfxVol || 0.85)));
+      a.pause(); 
+      a.currentTime = 0; 
+      a.play().catch(()=>{}); 
+    } catch {}
+  }
+  function playZapSfx(){
+    if (!_audioUnlocked || !settings.sfxExplosions) return; // Check setting
+    initSfxPools();
+    const a = _zapPool[_zapIdx++ % _zapPool.length];
+    try { 
+      a.volume = Math.max(0, Math.min(1, 0.70 * (settings.sfxVol || 0.85)));
+      a.pause(); 
+      a.currentTime = 0; 
+      a.play().catch(()=>{}); 
+    } catch {}
+  }
+
+  // Menu SFX: switch vs select (semantic split)
+  function _menuSfxOk(){
+    if (!_audioUnlocked || !settings.sfxMenu) return false; // Check setting
+    const now = performance.now();
+    if (now - _menuSfxLastT < _MENU_SFX_DEBOUNCE_MS) return false;
+    _menuSfxLastT = now;
+    return true;
+  }
+  function playMenuSwitchSfx(){
+    if (!_menuSfxOk()) return;
+    initSfxPools();
+    const a = _menuSwitchPool[_menuSwitchIdx++ % _menuSwitchPool.length];
+    try { 
+      a.volume = Math.max(0, Math.min(1, 0.55 * (settings.sfxVol || 0.85)));
+      a.pause(); 
+      a.currentTime = 0; 
+      a.play().catch(()=>{}); 
+    } catch {}
+  }
+  function playMenuSelectSfx(){
+    if (!_menuSfxOk()) return;
+    initSfxPools();
+    const a = _menuSelectPool[_menuSelectIdx++ % _menuSelectPool.length];
+    try { 
+      a.volume = Math.max(0, Math.min(1, 0.60 * (settings.sfxVol || 0.85)));
+      a.pause(); 
+      a.currentTime = 0; 
+      a.play().catch(()=>{}); 
+    } catch {}
+  }
+
+  function playBoost(){ playBoostSfx(); }
+
+  // ---------------------------
+  // Explosion particles
+  // ---------------------------
+  const sparks = [];
+  const SPARK_MAX = 220;
+
+  function spawnExplosion(x,y,power){
+    const n = Math.floor(26 + 46*power);
+    for (let i=0;i<n;i++){
+      const ang = Math.random()*Math.PI*2;
+      const sp = (260 + 720*Math.random()) * (0.55 + 0.75*power);
+      const life = 0.22 + 0.22*Math.random() + 0.10*power;
+      sparks.push({
+        x, y,
+        vx: Math.cos(ang)*sp,
+        vy: Math.sin(ang)*sp,
+        life: 0,
+        maxLife: life,
+        r: 255,
+        g: 140 + Math.floor(90*Math.random()),
+        b: 60 + Math.floor(30*Math.random()),
+        size: 1.4 + 2.4*Math.random() + 1.8*power,
+      });
+    }
+    if (sparks.length > SPARK_MAX) sparks.splice(0, sparks.length - SPARK_MAX);
+  }
+
+  // Mini-laser burst (self-hit punishment)
+  function spawnMiniLasers(x,y){
+    const count = 12;
+    for (let i=0;i<count;i++){
+      const ang = (Math.PI*2) * (i / count) + (Math.random()*0.25);
+      const dx = Math.cos(ang), dy = Math.sin(ang);
+      const speed = 1100 + 400*Math.random();
+      const sx = x + dx*8;
+      const sy = y + dy*8;
+      lasers.push({
+        ownerId: -1,
+        x: sx, y: sy,
+        px: sx, py: sy,
+        vx: dx*speed, vy: dy*speed,
+        dirX: dx, dirY: dy,
+        life: 0,
+        maxLife: 0.14 + 0.05*Math.random(),
+        power: 0.08,
+        bouncesLeft: 0,
+        mini: true,
+        noSelfHit: true,
+        safeTime: 0.06,
+      });
+    }
+  }
+
+  function selfHitExplode(x,y){
+    playZapSfx();
+    spawnExplosion(x,y,0.9);
+    spawnMiniLasers(x,y);
+  }
+  function triggerSelfHit(x,y){ selfHitExplode(x,y); }
+
+  function eliminatePlayer(p, x, y, byId){
+    if (!p || !p.alive) return;
+    p.alive = false;
+    playZapSfx();
+    spawnExplosion(x,y,1.1);
+    log('INFO', `VS: P${p.id+1} eliminated${(byId!=null && byId>=0)?` by P${byId+1}`:''}`);
+
+    if (gameMode === 'VS') {
+      const alive = players.filter(pp => pp.alive);
+      if (alive.length <= 1) {
+        winnerId = alive.length ? alive[0].id : byId;
+        if (winnerId == null || winnerId < 0) winnerId = 0;
+        victoryTimer = 0;
+        victoryEnterT0 = performance.now();
+        appMode = 'VICTORY';
+        log('INFO', `VS: Winner P${winnerId+1}`);
+      }
+    }
+  }
+
+  function updateSparks(dt){
+    for (let i=sparks.length-1;i>=0;i--){
+      const P = sparks[i];
+      P.x += P.vx * dt;
+      P.y += P.vy * dt;
+      P.vx *= Math.pow(0.10, dt);
+      P.vy *= Math.pow(0.10, dt);
+      P.life += dt;
+      if (P.life >= P.maxLife) sparks.splice(i,1);
+    }
+  }
+
+  function drawSparks(){
+    if (!sparks.length) return;
+    ctx.globalCompositeOperation = 'lighter';
+    for (const P of sparks){
+      const t = clamp(P.life / P.maxLife, 0, 1);
+      const fade = (1 - t);
+      const sx = P.x - P.vx * 0.01;
+      const sy = P.y - P.vy * 0.01;
+      neonLine(sx, sy, P.x, P.y, 1.2 + P.size*0.3, 10.0 + P.size*2.0, 0.65*fade, 0.18*fade, {r:P.r,g:P.g,b:P.b});
+      ctx.beginPath();
+      ctx.arc(P.x, P.y, 2.0 + P.size*0.6, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(${P.r},${P.g},${P.b},${0.20*fade})`;
+      ctx.lineWidth = 10 + 10*P.size;
+      ctx.stroke();
+    }
+  }
+
+  // ---------------------------
+  // P1 charge shot + boost (kept exactly as before)
+  // ---------------------------
+  let charging = false;
+  let charge = 0;
+  let chargeHeld = 0;
+  let chargeFullBlink = 0;
+  const CHARGE_TIME = 0.85;
+  let chargeLockUntilRelease = false;
+  let chargeAutoFired = false;
+
+  // ArrowUp tap-to-fire / hold-to-charge
+  let prevArrowUpHeld = false;
+  let arrowUpHeldTime = 0;
+  let arrowUpHoldCharging = false;
+  const ARROWUP_HOLD_TO_CHARGE = 0.14; // seconds
+
+  let prevShiftHeld = false;
+  let boostCharging = false;
+  let boostCharge = 0;
+  let boostLockUntilRelease = false;
+  let boostDash1Pending = false;
+  let boostDash1Timer = 0;
+  let boostCooldown = 0;
+  let boostFx = 0;
+
+  const BOOST_DOUBLE_WINDOW = 0.34;
+  const BOOST_HOLD_TO_DOUBLE_DELAY = 0.12;
+  const BOOST_START_DELAY   = 0.06;
+  let boostWindowLeft = 0;
+  let boostWindowT = 0;
+  let boostSecondUsed = false;
+
+  const BOOST_COOLDOWN = 1.0;
+  const BOOST_IMPULSE_MIN = 950;
+  const BOOST_IMPULSE_MAX = 1900;
+  const BOOST_THRUST = 2400;
+  const BOOST_FX_TIME = 0.18;
+
+  let playerShakeX = 0;
+  let playerShakeY = 0;
+  let sliceShakeAng = 0; // visual-only wedge jitter while charging
+  let tSec = 0;
+
+  // ---------------------------
+  // Player ship draw
+  // ---------------------------
+  function drawPlayerShip(p, isP1){
+    const sx = p.x + (isP1 ? playerShakeX : 0);
+    const sy = p.y + (isP1 ? playerShakeY : 0);
+
+    const ang = Math.atan2(p.aimY, p.aimX);
+    const fX = Math.cos(ang), fY = Math.sin(ang);
+    const rX = -fY, rY = fX;
+
+    const s = 18;
+    const tip   = {x: sx + fX * (2.2*s), y: sy + fY*(2.2*s)};
+    const left  = {x: sx + fX * (-1.0*s) + rX*(0.9*s), y: sy + fY*(-1.0*s) + rY*(0.9*s)};
+    const right = {x: sx + fX * (-1.0*s) - rX*(0.9*s), y: sy + fY*(-1.0*s) - rY*(0.9*s)};
+
+    neonPoly(
+      [tip,left,right],
+      2.2,
+      10.0,
+      0.90,
+      0.18,
+      p.color
+    );
+
+    // P1 boost jets (blue)
+    if (isP1 && boostFx > 0) {
+      const t = clamp(boostFx / BOOST_FX_TIME, 0, 1); // 1 -> fresh dash, 0 -> gone
+      const sE = t*t*(3-2*t); // smoothstep
+      const jetCol = {r:80,g:180,b:255};
+      const backX = -fX, backY = -fY;
+
+      // Start long/bright, ease out smoothly (no harsh pop).
+      const jetLen = 12 + 38*sE;
+      const coreA = 0.95 * sE;
+      const haloA = 0.26 * sE;
+
+      neonLine(left.x, left.y, left.x + backX*jetLen, left.y + backY*jetLen, 2.4, 18.0, coreA, haloA, jetCol);
+      neonLine(right.x, right.y, right.x + backX*jetLen, right.y + backY*jetLen, 2.4, 18.0, coreA, haloA, jetCol);
+
+      // Soft after-streak behind the ship for “buttery” boost feedback.
+      neonLine(sx - fX*8, sy - fY*8, sx + backX*(22+18*sE), sy + backY*(22+18*sE), 1.4, 22.0, 0.22*sE, 0.10*sE, jetCol);
+    }
+
+    // Aim feeler
+    neonLine(sx,sy, sx+p.aimX*40, sy+p.aimY*40, 1.2, 6.0, 0.35, 0.06, {r:255,g:180,b:255});
+
+    // P1 charge aura
+    if (isP1 && charge > 0.01) {
+      const a = 0.06 + 0.10*charge;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath();
+      ctx.arc(sx, sy, 18 + 18*charge, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(255,240,80,${a})`;
+      ctx.lineWidth = 6 + 14*charge;
+      ctx.stroke();
+    }
+
+    // P1 boost-charge aura
+    if (isP1 && boostCharging && boostCharge > 0.02) {
+      const a = 0.05 + 0.085*boostCharge;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath();
+      ctx.arc(sx, sy, 22 + 22*boostCharge, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(80,180,255,${a})`;
+      ctx.lineWidth = 6 + 12*boostCharge;
+      ctx.stroke();
+    }
+
+    // P1 boost cooldown flash
+    if (isP1 && boostCooldown > 0) {
+      const prog = 1 - clamp(boostCooldown / BOOST_COOLDOWN, 0, 1);
+      const pulse = 0.5 + 0.5 * Math.sin(tSec * (10 + 14*prog));
+      const flashA = (0.05 + 0.10 * pulse) * (0.35 + 0.65*prog);
+      const flashCol = {r:80,g:180,b:255};
+      neonPoly([tip,left,right], 2.0, 9.0, flashA*1.1, flashA*0.30, flashCol);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath();
+      ctx.arc(sx, sy, 18 + 10*pulse, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(80,180,255,${flashA})`;
+      ctx.lineWidth = 3.0;
+      ctx.stroke();
+    }
+  }
+
+  function drawTouchSticks(){
+    if (!(touchMove.active || touchAim.active)) return;
+    const drawStick = (stick, col) => {
+      if (!stick.active) return;
+      const dx = stick.x - stick.startX;
+      const dy = stick.y - stick.startY;
+      const maxR = 60;
+      const l = len(dx,dy);
+      const ux = l > 1e-6 ? dx/l : 0;
+      const uy = l > 1e-6 ? dy/l : 0;
+      const ex = stick.startX + ux*Math.min(l, maxR);
+      const ey = stick.startY + uy*Math.min(l, maxR);
+
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath(); ctx.arc(stick.startX, stick.startY, maxR, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(${col.r},${col.g},${col.b},0.10)`; ctx.lineWidth = 8; ctx.stroke();
+      ctx.beginPath(); ctx.arc(stick.startX, stick.startY, maxR, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(${col.r},${col.g},${col.b},0.22)`; ctx.lineWidth = 2; ctx.stroke();
+
+      ctx.beginPath(); ctx.arc(ex, ey, 18, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(${col.r},${col.g},${col.b},0.25)`; ctx.lineWidth = 10; ctx.stroke();
+      ctx.beginPath(); ctx.arc(ex, ey, 18, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(${col.r},${col.g},${col.b},0.65)`; ctx.lineWidth = 2.5; ctx.stroke();
+    };
+
+    drawStick(touchMove, {r:120,g:255,b:255});
+    drawStick(touchAim,  {r:255,g:90,b:230});
+  }
+
+  function drawLobbyOverlay(){
+    if (!lobbyOverlayVisible || appMode !== 'GAME') return;
+    
+    const w = Math.min(canvas.width * 0.28, 320);
+    const h = Math.min(canvas.height * 0.55, playerCount * 45 + 80);
+    const x = canvas.width - w - 20; // Top-right corner
+    const y = 20;
+    
+    // Semi-transparent background
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(x, y, w, h);
+    
+    // Border glow
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(120,255,255,0.35)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+    
+    // Header
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = `700 18px system-ui`;
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fillText(`LOBBY (${playerCount}/8)`, x + w/2, y + 12);
+    
+    // Divider line
+    ctx.strokeStyle = 'rgba(120,255,255,0.20)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 10, y + 40);
+    ctx.lineTo(x + w - 10, y + 40);
+    ctx.stroke();
+    
+    // Player list
+    ctx.textAlign = 'left';
+    ctx.font = `600 14px ui-monospace, monospace`;
+    
+    for (let i = 0; i < playerCount; i++) {
+      const p = players[i];
+      const py = y + 50 + i * 35;
+      
+      // Player number
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(`P${i+1}`, x + 15, py);
+      
+      // Color indicator (circle)
+      ctx.fillStyle = `rgb(${p.color.r},${p.color.g},${p.color.b})`;
+      ctx.beginPath();
+      ctx.arc(x + 50, py + 7, 6, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Ping (simulated)
+      const ping = getPlayerPing(i);
+      ctx.fillStyle = ping < 50 ? 'rgba(80,255,140,0.85)' : 
+                      ping < 80 ? 'rgba(255,220,80,0.85)' : 
+                      'rgba(255,90,90,0.85)';
+      ctx.fillText(`${ping}ms`, x + 70, py);
+      
+      // Status
+      const status = p.alive ? 'ALIVE' : 'DEAD';
+      ctx.fillStyle = p.alive ? 'rgba(80,255,140,0.85)' : 'rgba(255,90,90,0.65)';
+      ctx.fillText(status, x + 130, py);
+    }
+    
+    // Footer hint
+    ctx.textAlign = 'center';
+    ctx.font = `500 11px system-ui`;
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillText('Hold TAB to view', x + w/2, y + h - 18);
+  }
+
+  // ---------------------------
+  // Lasers
+  // ---------------------------
+  function spawnLaserFromP1(power){
+    const p1 = players[0];
+    const pwr = clamp(power, 0, 1);
+    const dx = p1.aimX, dy = p1.aimY;
+    const speed = 1450 + 900*pwr;
+    const maxLife = 0.38 + 0.22*pwr;
+
+    const head = 30;
+    const sx = p1.x + dx*head;
+    const sy = p1.y + dy*head;
+
+    lasers.push({
+      ownerId: 0,
+      x: sx, y: sy,
+      px: sx, py: sy,
+      vx: dx*speed, vy: dy*speed,
+      dirX: dx, dirY: dy,
+      life: 0,
+      maxLife,
+      power: pwr,
+      // 2 bounces allowed; 3rd collision explodes
+      bouncesLeft: 2,
+      safeTime: 0.12,
+    });
+
+    playShootSfx();
+
+    const kick = 28 + 65*pwr;
+    p1.vx -= dx * kick;
+    p1.vy -= dy * kick;
+  }
+
+  function drawLasers(){
+    if (lasers.length === 0) return;
+    const c = {r:255,g:240,b:80};
+    for (const L of lasers) {
+      const t = clamp(L.life / L.maxLife, 0, 1);
+      const fade = clamp((t / 0.25), 0, 1) * clamp(((1 - t) / 0.18), 0, 1);
+      const seg = 34 + 70*L.power;
+      const ddx = (L.dirX ?? 1);
+      const ddy = (L.dirY ?? 0);
+      const x0 = L.x - ddx * seg;
+      const y0 = L.y - ddy * seg;
+
+      const coreW = 1.7 + 2.6*L.power;
+      const haloW = 9.0 + 18.0*L.power;
+      const coreA = (0.85 * fade) * (0.9 + 0.1*L.power);
+      const haloA = (0.18 * fade);
+
+      neonLine(x0,y0, L.x,L.y, coreW, haloW, coreA, haloA, c);
+    }
+  }
+
+  // ---------------------------
+  // Ricochet helpers
+  // ---------------------------
+  function intersectSegmentCircle(p0x,p0y,p1x,p1y,cx,cy,r){
+    const dx = p1x - p0x;
+    const dy = p1y - p0y;
+    const fx = p0x - cx;
+    const fy = p0y - cy;
+
+    const a = dx*dx + dy*dy;
+    const b = 2*(fx*dx + fy*dy);
+    const c = fx*fx + fy*fy - r*r;
+
+    const disc = b*b - 4*a*c;
+    if (disc < 0 || a < 1e-9) return null;
+
+    const t = (-b - Math.sqrt(disc)) / (2*a);
+    if (t >= 0 && t <= 1) return t;
+    return null;
+  }
+
+  function closestPointOnSeg(px,py, x0,y0,x1,y1){
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len2 = dx*dx + dy*dy;
+    if (len2 < 1e-9) return {x:x0,y:y0,t:0};
+    let t = ((px - x0)*dx + (py - y0)*dy) / len2;
+    t = clamp(t, 0, 1);
+    return {x: x0 + dx*t, y: y0 + dy*t, t};
+  }
+
+  function segmentsIntersect(ax,ay,bx,by, cx,cy,dx,dy){
+    // Returns t along AB (0..1) for intersection, or null.
+    const rX = bx-ax, rY = by-ay;
+    const sX = dx-cx, sY = dy-cy;
+    const denom = rX*sY - rY*sX;
+    if (Math.abs(denom) < 1e-9) return null;
+    const u = ((cx-ax)*rY - (cy-ay)*rX) / denom;
+    const t = ((cx-ax)*sY - (cy-ay)*sX) / denom;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return t;
+    return null;
+  }
+
+  function reflectVelocity(vx,vy, nx,ny, damp=0.92){
+    // Reflect v across unit normal
+    const vn = vx*nx + vy*ny;
+    return {
+      vx: (vx - 2*vn*nx) * damp,
+      vy: (vy - 2*vn*ny) * damp,
+    };
+  }
+
+  // ---------------------------
+  // Movement + slice constraint
+  // ---------------------------
+  function wrapToPi(a){
+    // Map angle to (-pi, pi]
+    a = (a + Math.PI) % TAU;
+    if (a < 0) a += TAU;
+    return a - Math.PI;
+  }
+
+  function constrainToSlice(p){
+    const a = arena();
+    const dx = p.x - a.cx;
+    const dy = p.y - a.cy;
+    let r = Math.hypot(dx,dy);
+    if (r < 1e-6) r = 1e-6;
+
+    // --- Anti-teleport seam h&&ling ---
+    // Use an angle representation that is *closest to the slice center* before clamping.
+    const center = (p.angMin + p.angMax) * 0.5;
+    const raw = Math.atan2(dy,dx);
+    let ang = center + wrapToPi(raw - center);
+
+    // Clamp angle into this slice.
+    if (ang < p.angMin) ang = p.angMin;
+    if (ang > p.angMax) ang = p.angMax;
+
+    // Hard clamp radius inside arena.
+    const maxR = a.r;
+    const minR = 10;
+    r = clamp(r, minR, maxR);
+
+    p.x = a.cx + Math.cos(ang)*r;
+    p.y = a.cy + Math.sin(ang)*r;
+
+    // Surface normal at this (r,ang)
+    const nx = Math.cos(ang), ny = Math.sin(ang);
+    const vn = p.vx*nx + p.vy*ny;
+
+    // Outer ring collision: kill only outward velocity so it *slides*.
+    if (r >= maxR - 0.5 && vn > 0) {
+      p.vx -= nx * vn;
+      p.vy -= ny * vn;
+    }
+
+    // Slice seam collision: damp the tangential component when sitting on a seam.
+    // (Prevents jitter && 'edge surfing' while preserving slide.)
+    const tx = -ny, ty = nx;
+    const vt = p.vx*tx + p.vy*ty;
+    const seamEps = 0.0006;
+    const onMin = Math.abs(ang - p.angMin) < seamEps;
+    const onMax = Math.abs(ang - p.angMax) < seamEps;
+    if (onMin || onMax) {
+      p.vx -= tx * vt * 0.45;
+      p.vy -= ty * vt * 0.45;
+    }
+  }
+
+  function collidePlayerWithBarrier(p){
+    if (!barriers.length) return;
+    const PR = 18;
+    for (const B of barriers){
+      if (B.slice !== p.id) continue; // barrier belongs to player's slice
+      const cp = closestPointOnSeg(p.x,p.y, B.x0,B.y0,B.x1,B.y1);
+      const dx = p.x - cp.x;
+      const dy = p.y - cp.y;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < PR*PR){
+        const d = Math.sqrt(d2) || 1;
+        const nx = dx / d;
+        const ny = dy / d;
+        // Push out
+        const push = (PR - d) + 0.6;
+        p.x += nx * push;
+        p.y += ny * push;
+        // Reflect only if moving into barrier
+        const vn = p.vx*nx + p.vy*ny;
+        if (vn < 0) {
+          p.vx -= nx * vn * 1.85;
+          p.vy -= ny * vn * 1.85;
+          p.vx *= 0.92;
+          p.vy *= 0.92;
+        }
+      }
+    }
+  }
+
+  // ---------------------------
+  // Sampling inputs
+  // ---------------------------
+  function sampleP1(){
+    // Movement
+    let mx = 0, my = 0;
+    if (keys.has('KeyW')) my -= 1;
+    if (keys.has('KeyS')) my += 1;
+    if (keys.has('KeyA')) mx -= 1;
+    if (keys.has('KeyD')) mx += 1;
+
+    if (touchMove.active) {
+      const dx = touchMove.x - touchMove.startX;
+      const dy = touchMove.y - touchMove.startY;
+      const n = norm(dx,dy);
+      const mag = clamp(n.l / 60, 0, 1);
+      mx += n.x * mag;
+      my += n.y * mag;
+    }
+
+    // Also allow gamepad 0 to move P1 (optional) — SNIP3 only.
+    // In VS, keyboard/mouse is the "computer" player; pads should never double-control P1.
+    const gpList = getConnectedGamepads();
+    const gp0 = gpList.find(g => g.index === 0)?.pad || null;
+    if (gp0 && gameMode === 'SNIP3') {
+      const lx = gp0.axes[0] || 0;
+      const ly = gp0.axes[1] || 0;
+      const dz = 0.18;
+      const l = len(lx,ly);
+      if (l > dz) {
+        const k = (l - dz) / (1 - dz);
+        mx += (lx / l) * k;
+        my += (ly / l) * k;
+      }
+    }
+
+    const m = norm(mx,my);
+    const move = (m.l > 1e-6) ? {x:m.x, y:m.y, mag: clamp(m.l,0,1)} : {x:0,y:0,mag:0};
+
+    // Aim
+    let ax = 0, ay = 0;
+    if (aimMode === 'arrows') {
+      ax = Math.cos(aimAngle);
+      ay = Math.sin(aimAngle);
+    } else {
+      const p1 = players[0];
+      const fb = fbFromClient(mouseX, mouseY);
+      const fbX = fb.x;
+      const fbY = fb.y;
+      const dx = fbX - p1.x;
+      const dy = fbY - p1.y;
+      const n = norm(dx,dy);
+      ax = n.x; ay = n.y;
+    }
+
+    if (touchAim.active) {
+      const dx = touchAim.x - touchAim.startX;
+      const dy = touchAim.y - touchAim.startY;
+      const n = norm(dx,dy);
+      const mag = clamp(n.l / 40, 0, 1);
+      if (mag > 0.25) { ax = n.x; ay = n.y; }
+    }
+
+    if (gp0) {
+      const rx = gp0.axes[2] || 0;
+      const ry = gp0.axes[3] || 0;
+      const dz = 0.22;
+      const l = len(rx,ry);
+      if (l > dz) {
+        ax = rx / l;
+        ay = ry / l;
+      }
+    }
+
+    const a = norm(ax,ay);
+    const aimActive = (a.l > 0.15);
+
+    const gpFire = gp0 && gp0.buttons && gp0.buttons[7] && gp0.buttons[7].pressed;
+
+    return { move, aim: {x:a.x,y:a.y,active:aimActive}, gpFire: !!gpFire };
+  }
+
+  // ---------------------------
+  // VS round state
+  // ---------------------------
+  let victoryWinnerId = -1;
+  let victoryAt = 0;
+
+  function aliveCount(){
+    let n = 0;
+    for (const p of players) if (p.alive) n++;
+    return n;
+  }
+
+  function endVsRound(winnerId){
+    victoryWinnerId = winnerId;
+    victoryAt = performance.now();
+    appMode = 'VICTORY';
+    log('INFO', `VS winner: P${winnerId+1}`);
+  }
+
+  function eliminatePlayer(pid, hx, hy){
+    const p = players[pid];
+    if (!p || !p.alive) return;
+    p.alive = false;
+    playZapSfx();
+    spawnExplosion(hx, hy, 0.95);
+  }
+
+  function sampleGamepadForPlayer(playerIndex, padIndex){
+    const p = players[playerIndex];
+    const pads = getConnectedGamepads();
+    const gp = pads.find(g => g.index === padIndex)?.pad || null;
+    if (!gp) return null;
+
+    // Left stick move
+    const lx = gp.axes[0] || 0;
+    const ly = gp.axes[1] || 0;
+    const dz = 0.22;
+    let mx = 0, my = 0;
+    const l = len(lx,ly);
+    if (l > dz) {
+      const k = (l - dz) / (1 - dz);
+      mx = (lx / l) * k;
+      my = (ly / l) * k;
+    }
+
+    // Right stick aim
+    const rx = gp.axes[2] || 0;
+    const ry = gp.axes[3] || 0;
+    let ax = 0, ay = 0;
+    const rl = len(rx,ry);
+    if (rl > 0.24) {
+      ax = rx / rl;
+      ay = ry / rl;
+    } else {
+      ax = p.aimX;
+      ay = p.aimY;
+    }
+
+    const moveN = norm(mx,my);
+    const aimN  = norm(ax,ay);
+
+    return {
+      move: { x: moveN.x, y: moveN.y, mag: clamp(moveN.l,0,1) },
+      aim:  { x: aimN.x,  y: aimN.y,  active: aimN.l > 0.15 }
+    };
+  }
+
+  // ---------------------------
+  // Init
+  // ---------------------------
+  // ---------------------------
+  // Boot + Menu helpers
+  // ---------------------------
+  function smoothstep(a,b,t){
+    t = clamp((t-a)/(b-a), 0, 1);
+    return t*t*(3-2*t);
+  }
+
+  function computeBootEnergy(){
+    // Prefer real audio energy if we have an analyser, otherwise use a lightweight
+    // time-domain pulse so boot visuals still feel alive even if WebAudio is unavailable.
+    if (bootAnalyser && bootFreq) {
+      try {
+        bootAnalyser.getByteFrequencyData(bootFreq);
+        const n = Math.min(28, bootFreq.length);
+        let sum = 0;
+        for (let i=0;i<n;i++) sum += bootFreq[i];
+        return (sum / n) / 255;
+      } catch {}
+    }
+
+    if (bootAudioEl && !bootAudioEl.paused) {
+      const tt = bootAudioEl.currentTime || 0;
+      const pulse = 0.10 + 0.18*Math.abs(Math.sin(tt*6.5)) + 0.06*Math.abs(Math.sin(tt*13.0));
+      return clamp(pulse, 0, 1);
+    }
+    return 0;
+  }
+
+  function drawBootScreen(now){
+    const a = arena();
+    const t = (now - bootT0) * 0.001;
+
+    // Analyse audio
+    const e = computeBootEnergy();
+    bootEnergy = e;
+    bootEnergySm = bootEnergySm * 0.90 + e * 0.10;
+    const rise = e - bootEnergySm;
+    if (bootBeatHold > 0) bootBeatHold -= 1/60;
+    if (rise > 0.07 && bootBeatHold <= 0) {
+      bootBeatHold = 0.12;
+      bootFlash = 1.0;
+    }
+    bootFlash *= 0.90;
+
+    // Backdrop
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    // Subtle vignette
+    const grd = ctx.createRadialGradient(a.cx, a.cy, a.r*0.1, a.cx, a.cy, a.r*1.25);
+    grd.addColorStop(0, 'rgba(40,0,55,0.35)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.95)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    // Spectrum + waveform
+    if (bootAnalyser && bootFreq && bootTime) {
+      bootAnalyser.getByteFrequencyData(bootFreq);
+      bootAnalyser.getByteTimeDomainData(bootTime);
+
+      const bottom = canvas.height * 0.86;
+      const left = canvas.width * 0.14;
+      const right = canvas.width * 0.86;
+      const w = right - left;
+
+      // Bars (visual spectrum)
+      const bins = 72;
+      for (let i=0;i<bins;i++) {
+        const idx = Math.floor((i / bins) * Math.min(bootFreq.length, 512));
+        const v = bootFreq[idx] / 255;
+        const h = v * canvas.height * 0.16;
+        const x = left + (i / bins) * w;
+        const glow = 0.10 + 0.25*v + 0.35*bootFlash;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = `rgba(175,75,255,${glow})`;
+        ctx.fillRect(x, bottom - h, Math.max(1, w/bins - 2), h);
+      }
+
+      // Waveform line
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = `rgba(120,255,255,${0.10 + 0.25*bootFlash})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const midY = canvas.height * 0.60;
+      for (let i=0;i<bootTime.length;i++) {
+        const x = left + (i/(bootTime.length-1))*w;
+        const y = midY + ((bootTime[i]-128)/128) * canvas.height * 0.06;
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+
+    // Neon sign text — flicker + "turn on" ramp
+    const ramp = smoothstep(0.0, 1.1, t);
+    const flick = 0.82 + 0.18*Math.sin(t*33.0) + 0.12*Math.sin(t*71.0);
+    const beat = 0.40*bootFlash + 0.25*bootEnergySm;
+    const power = clamp(ramp * flick + beat, 0, 1.25);
+
+    const x = a.cx;
+    const y = a.cy * 0.88; // Moved up slightly to avoid bottom overlap
+
+    // Tube-lettered company sign (no fonts)
+    const tubeH = Math.floor(Math.min(canvas.width, canvas.height) * 0.085);
+    drawTubeText('NEO-VECTR INC', x, y, tubeH, 'rgba(175,75,255,ALPHA)', power, 0.18, TITLE_INNER_PALETTE);
+
+    // Subtitle prompt
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.font = `500 ${Math.floor(tubeH*0.36)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = `rgba(255,255,255,${0.25 + 0.35*ramp})`;
+    ctx.fillText('POWERING UP...', x, y + tubeH*1.05);
+
+    // Canon boot tagline - ALWAYS VISIBLE above HUD
+    ctx.textBaseline = 'top';
+    ctx.font = `700 ${Math.floor(tubeH*0.24)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = `rgba(255,255,255,${0.22 + 0.38*ramp})`;
+    ctx.fillText('FORGED IN SILENCE • BORN OF NEON', x, tubeH*0.35);
+    ctx.textBaseline = 'middle'; // Reset
+
+    // Boot audio status (so it's obvious Moses fired)
+    const b = audioDbg && audioDbg.boot ? audioDbg.boot : null;
+    if (b) {
+      const label = 'MOSES LASER CANNON';
+      const state = (b.state||'').toUpperCase();
+      ctx.font = `600 ${Math.floor(tubeH*0.28)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      ctx.fillStyle = `rgba(255,255,255,${0.25 + 0.45*ramp})`;
+      ctx.fillText(`${label} • ${state}`, x, y + tubeH*1.45);
+    }
+
+
+  }
+
+  function drawBootWait(now){
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+    const a = arena();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const fs = Math.floor(Math.min(canvas.width, canvas.height) * 0.06);
+    
+    // MOTTO at top (above HUD) - uses top baseline to ensure visibility
+    ctx.textBaseline = 'top';
+    ctx.font = `700 ${Math.floor(fs*0.55)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.42)';
+    ctx.fillText('FORGED IN SILENCE • BORN OF NEON', a.cx, fs*0.32);
+    
+    // Main prompt - centered
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${fs}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('PRESS ANYTHING TO POWER ON', a.cx, a.cy - fs*0.26);
+    
+    // Instructions
+    ctx.font = `500 ${Math.floor(fs*0.55)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillText('Keyboard • Mouse • Controller', a.cx, a.cy + fs*0.95);
+    ctx.fillText('Neo-VECTR™ INC', a.cx, a.cy + fs*2.15);
+
+    applyBrightnessPass();
+  }
+
+    
+  function menuItemsMain(){
+    return [
+      { labelFn: (now) => snip3MenuLabel(now), action: () => { stopMenuMusic(); gameMode = 'SNIP3'; appMode = 'GAME'; menuPage='MAIN'; setPlayerCount(1); resetP1Systems(); setDebugVisible(false); setSeed(settings.seedStr); initPlayers(); log('INFO','Mode: ∞ SNIP3 (infinite sniper)'); } },
+      { label: 'VS MODE', action: () => { menuPage = 'VS_PRE'; menuSel = 0; menuPageEnterT0 = performance.now(); playMenuSwitchSfx(); log('INFO','VS: Pre-menu opened'); } },
+      { label: 'SETTINGS', action: () => { menuPage = 'SETTINGS'; menuSel = 0; menuPageEnterT0 = performance.now(); setDebugVisible(true); saveSettings(); log('INFO','SNIP3: Settings opened'); } },
+      { label: 'CREDITS', action: () => { menuPage = 'CREDITS'; menuSel = 0; menuPageEnterT0 = performance.now(); log('INFO','SNIP3: Credits opened'); } },
+    ];
+  }
+
+  
+  function menuItemsVSPre(){
+    return [
+      { label: 'LOCAL VS', action: () => { stopMenuMusic(); gameMode = 'VS'; appMode = 'GAME'; menuPage = 'MAIN'; resetP1Systems(); setDebugVisible(false); setSeed(settings.seedStr); initPlayers(); log('INFO','Mode: VS (Local)'); } },
+      { label: 'ONLINE VS (SOON)', action: () => { playMenuSwitchSfx(); log('INFO','Online VS: Coming soon'); } },
+      { label: 'CUSTOM (SEED/CONFIG)', action: () => { menuPage = 'VS_CUSTOM'; menuSel = 0; menuPageEnterT0 = performance.now(); playMenuSwitchSfx(); } },
+      { label: 'BACK', action: () => { menuPage = 'MAIN'; menuSel = 0; menuPageEnterT0 = performance.now(); playMenuSwitchSfx(); } },
+    ];
+  }
+
+  function menuItemsVSCustom(){
+    const seedLabel = () => {
+      const s = (settings.seedStr||'').trim();
+      return s ? `SEED: ${s}` : 'SEED: (AUTO)';
+    };
+    return [
+      { kind:'action', key:'seed', labelFn: seedLabel,
+        action: () => {
+          const cur = (settings.seedStr||'').trim();
+          const v = prompt('Enter a run/map seed (same seed reproduces the same layout). Leave blank for AUTO.', cur);
+          if (v === null) return;
+          settings.seedStr = String(v).trim();
+          saveSettings();
+          log('INFO', settings.seedStr ? `Seed set: ${settings.seedStr}` : 'Seed: AUTO');
+        }
+      },
+      { kind:'toggle', key:'seedOverlay', labelFn: () => `SHOW SEED OVERLAY: ${settings.seedOverlay ? 'ON' : 'OFF'}`,
+        action: () => { settings.seedOverlay = !settings.seedOverlay; saveSettings(); log('INFO',`Seed overlay: ${settings.seedOverlay?'ON':'OFF'}`); }
+      },
+      { kind:'toggle', key:'coop', labelFn: () => `CO-OP: ${settings.coop ? 'ON' : 'OFF'}`,
+        action: () => { settings.coop = !settings.coop; if (settings.coop && playerCount < 2) setPlayerCount(2); saveSettings(); log('INFO',`CO-OP: ${settings.coop?'ON':'OFF'}`); }
+      },
+      { kind:'action', key:'start', labelFn: () => `START VS (CUSTOM)`, action: () => { stopMenuMusic(); gameMode = 'VS'; appMode = 'GAME'; menuPage='MAIN'; resetP1Systems(); setDebugVisible(false); setSeed(settings.seedStr); initPlayers(); log('INFO','Mode: VS (Custom)'); } },
+      { label: 'BACK', action: () => { menuPage = 'VS_PRE'; menuSel = 0; menuPageEnterT0 = performance.now(); playMenuSwitchSfx(); } },
+    ];
+  }
+
+
+function menuItemsSettings(){
+    const onOff = (v) => v ? 'ON' : 'OFF';
+    const pubPriv = (v) => v ? 'PRIVATE' : 'PUBLIC';
+    const pct = (v) => `${Math.round((v||0)*100)}%`;
+    const brightPct = () => {
+      const b = Math.max(-0.30, Math.min(0.30, settings.brightness||0));
+      const sign = b>=0 ? '+' : '−';
+      return `${sign}${Math.round(Math.abs(b)*100)}%`;
+    };
+
+    return [
+      { kind:'action', key:'seed', labelFn: () => `SEED: ${settings.seedStr ? settings.seedStr : 'AUTO'}  (ENTER)`,
+        action: ()=> {
+          const cur = settings.seedStr || '';
+          const v = prompt('Set map/run seed (shared across all modes). Leave blank for AUTO.', cur);
+          if (v === null) return;
+          const s = String(v).trim();
+          settings.seedStr = s;
+          // Apply immediately so the next start uses it (and so you can screenshot from pause/menu).
+          setSeed(s || '');
+          initPlayers();
+          resetP1Systems();
+          log('INFO', `Seed set: ${currentSeed}`);
+        }
+      },
+      { kind:'toggle', key:'seedOverlay', labelFn: () => `SHOW SEED ON START: ${onOff(settings.seedOverlay)}`,
+        action: ()=> { settings.seedOverlay = !settings.seedOverlay; log('INFO',`Seed overlay: ${onOff(settings.seedOverlay)}`); }
+      },
+      { kind:'slider', key:'players', labelFn: () => `PLAYERS: ${playerCount}`, min:1, max:8, step:1,
+        onLeft: ()=> setPlayerCount(playerCount-1),
+        onRight: ()=> setPlayerCount(playerCount+1),
+        dragFn: (t)=> { // t in [0,1]
+          const v = 1 + Math.round(t*7);
+          setPlayerCount(v);
+        },
+        action: ()=> { /* no-op */ }
+      },
+      { kind:'toggle', key:'coop', labelFn: () => `CO-OP: ${onOff(settings.coop)}`,
+        action: ()=> { settings.coop = !settings.coop; if (settings.coop && playerCount < 2) setPlayerCount(2); log('INFO',`CO-OP: ${onOff(settings.coop)}`); }
+      },
+      { kind:'toggle', key:'lobby', labelFn: () => `LOBBY: ${pubPriv(settings.lobbyPrivate)}`,
+        action: ()=> { settings.lobbyPrivate = !settings.lobbyPrivate; log('INFO',`Lobby: ${pubPriv(settings.lobbyPrivate)}`); }
+      },
+      { kind:'action', key:'pw', labelFn: () => `ADVANCED: PASSWORD ${settings.lobbyPassword ? 'SET' : 'OFF'}`,
+        action: ()=> {
+          const cur = settings.lobbyPassword || '';
+          const v = prompt('Set lobby password (optional). Leave blank to clear.', cur);
+          if (v === null) return;
+          settings.lobbyPassword = String(v).trim();
+          log('INFO', settings.lobbyPassword ? 'Lobby password set' : 'Lobby password cleared');
+        }
+      },
+      { kind:'slider', key:'brightness', labelFn: () => `BRIGHTNESS: ${brightPct()}`,
+        onLeft: ()=> { settings.brightness = Math.max(-0.30, (settings.brightness||0) - 0.02); },
+        onRight: ()=> { settings.brightness = Math.min( 0.30, (settings.brightness||0) + 0.02); },
+        dragFn: (t)=> {
+          const v = -0.30 + 0.60*t;
+          settings.brightness = Math.max(-0.30, Math.min(0.30, v));
+        },
+        action: ()=> {}
+      },
+      { kind:'slider', key:'music', labelFn: () => `MUSIC VOL: ${pct(settings.musicVol)}`,
+        onLeft: ()=> { settings.musicVol = Math.max(0, (settings.musicVol||0) - 0.05); if (menuMusicEl) menuMusicEl.volume = settings.musicVol; },
+        onRight: ()=> { settings.musicVol = Math.min(1, (settings.musicVol||0) + 0.05); if (menuMusicEl) menuMusicEl.volume = settings.musicVol; },
+        dragFn: (t)=> { settings.musicVol = clamp(t,0,1); if (menuMusicEl) menuMusicEl.volume = settings.musicVol; },
+        action: ()=> {}
+      },
+      { kind:'slider', key:'sfx', labelFn: () => `SFX MASTER: ${pct(settings.sfxVol)}`,
+        onLeft: ()=> { settings.sfxVol = Math.max(0, (settings.sfxVol||0) - 0.05); refreshSfxVolumes(); saveSettings(); },
+        onRight: ()=> { settings.sfxVol = Math.min(1, (settings.sfxVol||0) + 0.05); refreshSfxVolumes(); saveSettings(); },
+        dragFn: (t)=> { settings.sfxVol = clamp(t,0,1); refreshSfxVolumes(); saveSettings(); },
+        action: ()=> {}
+      },
+      
+      // NEW: Granular SFX controls
+      { kind:'toggle', key:'sfxLaserFire', labelFn: () => `  → LASER FIRE: ${onOff(settings.sfxLaserFire)}`,
+        action: ()=> { settings.sfxLaserFire = !settings.sfxLaserFire; saveSettings(); log('INFO',`Laser fire SFX: ${onOff(settings.sfxLaserFire)}`); }
+      },
+      { kind:'toggle', key:'sfxLaserRicochet', labelFn: () => `  → RICOCHET: ${onOff(settings.sfxLaserRicochet)}`,
+        action: ()=> { settings.sfxLaserRicochet = !settings.sfxLaserRicochet; saveSettings(); log('INFO',`Ricochet SFX: ${onOff(settings.sfxLaserRicochet)}`); }
+      },
+      { kind:'toggle', key:'sfxBoost', labelFn: () => `  → BOOST DASH: ${onOff(settings.sfxBoost)}`,
+        action: ()=> { settings.sfxBoost = !settings.sfxBoost; saveSettings(); log('INFO',`Boost SFX: ${onOff(settings.sfxBoost)}`); }
+      },
+      { kind:'toggle', key:'sfxExplosions', labelFn: () => `  → EXPLOSIONS: ${onOff(settings.sfxExplosions)}`,
+        action: ()=> { settings.sfxExplosions = !settings.sfxExplosions; saveSettings(); log('INFO',`Explosion SFX: ${onOff(settings.sfxExplosions)}`); }
+      },
+      { kind:'toggle', key:'sfxMenu', labelFn: () => `  → MENU SOUNDS: ${onOff(settings.sfxMenu)}`,
+        action: ()=> { settings.sfxMenu = !settings.sfxMenu; saveSettings(); log('INFO',`Menu SFX: ${onOff(settings.sfxMenu)}`); }
+      },
+      
+      { kind:'toggle', key:'snip3', labelFn: () => `SNIP3 TELEMETRY: ${onOff(settings.snip3Hud)}`,
+        action: ()=> { settings.snip3Hud = !settings.snip3Hud; const hud = document.getElementById('hud'); if (hud) hud.style.display = settings.snip3Hud ? 'block' : 'none'; saveSettings(); log('INFO',`SNIP3 Telemetry: ${onOff(settings.snip3Hud)}`); }
+      },
+      { kind:'back', key:'back', label: 'BACK', action: ()=> { menuPage='MAIN'; menuSel=0; menuPageEnterT0 = performance.now(); } },
+    ];
+  }
+
+  function menuItemsCredits(){
+    return [
+      { label: 'BACK', action: ()=> { menuPage='MAIN'; menuSel=0; menuPageEnterT0 = performance.now(); } },
+    ];
+  }
+
+
+  function menuItems(){
+    if (menuPage === 'SETTINGS') return menuItemsSettings();
+    if (menuPage === 'CREDITS') return menuItemsCredits();
+    if (menuPage === 'VS_PRE') return menuItemsVSPre();
+    if (menuPage === 'VS_CUSTOM') return menuItemsVSCustom();
+    return menuItemsMain();
+  }
+
+
+  
+  function menuLayout(page=menuPage, count=null){
+    const a = arena();
+    const fs = Math.floor(Math.min(canvas.width, canvas.height) * 0.10);
+
+    // Default font-step scaling per page
+    let stepY = fs*0.60;
+
+    // Vertical band available for lists (top after header → bottom before help text)
+    // We compute a centered list start so spacing is consistent across menus with different item counts.
+    let bandTop = a.cy*0.60;
+    let bandBottom = canvas.height - fs*0.55;
+
+    if (page === 'SETTINGS') {
+      stepY = fs*0.42;
+      bandTop = a.cy*0.66;     // header text takes more space on settings
+      bandBottom = canvas.height - fs*0.65;
+    }
+
+    if (page === 'PAUSE') {
+      stepY = fs*0.50;
+      bandTop = a.cy*0.52;
+      bandBottom = canvas.height - fs*0.65;
+    }
+
+    if (count == null) {
+      // Safe fallback: use current menu items length if available, else 4
+      try { count = (menuItems && menuItems().length) ? menuItems().length : 4; } catch(e){ count = 4; }
+    }
+
+    const listHeight = (Math.max(0, count-1) * stepY);
+    const available = Math.max(stepY*1.2, (bandBottom - bandTop));
+    let baseY = bandTop + (available - listHeight)/2;
+
+    // Clamp so it never collides with header/help
+    baseY = clamp(baseY, bandTop + stepY*0.15, bandBottom - listHeight);
+
+    return {
+      fs,
+      baseY,
+      stepY,
+      left: a.cx - fs*2.3,
+      right: a.cx + fs*2.3,
+      sliderLeft: a.cx - fs*1.35,
+      sliderRight: a.cx + fs*1.35,
+      bandTop,
+      bandBottom,
+    };
+  }
+
+  
+  function drawSettingsScreen(now){
+    const a = arena();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const t = now * 0.001;
+    const pulse = 0.12 + 0.06*Math.sin(t*2.0);
+
+    const grd = ctx.createRadialGradient(a.cx, a.cy, a.r*0.1, a.cx, a.cy, a.r*1.25);
+    grd.addColorStop(0, 'rgba(40,0,70,0.40)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.98)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const fs = Math.floor(Math.min(canvas.width, canvas.height) * 0.10);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    drawTubeText('SETTINGS', a.cx, a.cy*0.52, Math.floor(fs*0.70), 'rgba(175,75,255,ALPHA)', 0.85 + 0.20*pulse, 0.14, TITLE_INNER_PALETTE);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.font = `600 ${Math.floor(fs*0.22)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillText('Advanced lighting & co-op configuration', a.cx, a.cy*0.61);
+
+    const items = menuItems();
+    const layout = menuLayout('SETTINGS', items.length);
+    const baseY = layout.baseY;
+    const stepY = layout.stepY;
+
+    for (let i=0;i<items.length;i++){
+      const y = baseY + i*stepY;
+      const isSel = i === menuSel;
+      const glow = isSel ? 0.35 + 0.25*Math.sin(t*6.0) : 0.10;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.font = `${isSel ? 800 : 650} ${Math.floor(fs*0.30)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      ctx.fillStyle = `rgba(120,255,255,${glow})`;
+      {
+        const label = items[i].labelFn ? items[i].labelFn(now) : items[i].label;
+        const metrics = ctx.measureText(label);
+        const leftEdge = a.cx - metrics.width*0.5;
+        const arrowGap = fs*0.30;
+        if (isSel) ctx.fillText('▶', leftEdge - arrowGap, y);
+      }
+      const label = items[i].labelFn ? items[i].labelFn(now) : items[i].label;
+      ctx.fillText(label, a.cx, y);
+
+      // Lightweight slider visualization for selected sliders
+      if (isSel && items[i].kind === 'slider') {
+        const x0 = layout.sliderLeft;
+        const x1 = layout.sliderRight;
+        const yBar = y + fs*0.12;
+        let tVal = 0.5;
+        if (items[i].key === 'players') tVal = clamp((playerCount-1)/7,0,1);
+        else if (items[i].key === 'brightness') tVal = clamp(((settings.brightness||0)+0.30)/0.60,0,1);
+        else if (items[i].key === 'music') tVal = clamp((settings.musicVol||0),0,1);
+        else if (items[i].key === 'sfx') tVal = clamp((settings.sfxVol||0),0,1);
+
+        // track
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(200,170,255,0.18)';
+        ctx.beginPath();
+        ctx.moveTo(x0, yBar);
+        ctx.lineTo(x1, yBar);
+        ctx.stroke();
+
+        // filled portion
+        ctx.strokeStyle = 'rgba(190,255,255,0.22)';
+        ctx.beginPath();
+        ctx.moveTo(x0, yBar);
+        ctx.lineTo(x0 + (x1-x0)*tVal, yBar);
+        ctx.stroke();
+
+        // knob
+        const kx = x0 + (x1-x0)*tVal;
+        ctx.fillStyle = 'rgba(255,255,255,0.35)';
+        ctx.beginPath();
+        ctx.arc(kx, yBar, 6, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.font = `500 ${Math.floor(fs*0.22)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillText('←/→ adjust • ENTER/A select • ESC/B back', a.cx, canvas.height - fs*0.22);
+
+    applyBrightnessPass();
+  }
+
+  function drawCreditsScreen(now){
+    const a = arena();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const t = now * 0.001;
+    const pulse = 0.12 + 0.06*Math.sin(t*2.0);
+
+    const grd = ctx.createRadialGradient(a.cx, a.cy, a.r*0.1, a.cx, a.cy, a.r*1.30);
+    grd.addColorStop(0, 'rgba(55,0,90,0.34)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.985)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const fs = Math.floor(Math.min(canvas.width, canvas.height) * 0.10);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    drawTubeText('CREDITS', a.cx, a.cy*0.40, Math.floor(fs*0.72), 'rgba(175,75,255,ALPHA)', 0.88 + 0.22*pulse, 0.14, TITLE_INNER_PALETTE);
+
+    const lines = [
+      'NEO-VECTR INC — ∞SNIP3',
+      'A NEO-VECTR ARCADE SYSTEM PROTOTYPE',
+      '',
+      'CREATION • DESIGN • DIRECTION',
+      'PROGRAMMING • ENGINE',
+      'VISUALS • GEOMETRY • INTERFACE',
+      'PLAYTESTING • TUNING',
+      '',
+      'GARY RICHARD DOMAN',
+      '',
+      'SOUNDTRACK PRODUCER: TRNDSTR',
+      '',
+      'FORGED IN SILENCE • BORN OF NEON 👾',
+    ];
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.font = `700 ${Math.floor(fs*0.28)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    ctx.fillText(lines[0], a.cx, a.cy*0.52);
+
+    ctx.font = `600 ${Math.floor(fs*0.18)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.30)';
+    ctx.fillText(lines[1], a.cx, a.cy*0.58);
+
+    ctx.font = `600 ${Math.floor(fs*0.20)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+
+    const startY = a.cy*0.67;
+    const step = fs*0.26;
+    const creditBlock = lines.slice(3, 9);
+    for (let i=0;i<creditBlock.length;i++){
+      ctx.fillText(creditBlock[i], a.cx, startY + i*step);
+    }
+
+    ctx.font = `800 ${Math.floor(fs*0.30)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = `rgba(120,255,255,${0.28 + 0.10*Math.sin(t*3.2)})`;
+    ctx.fillText('GARY RICHARD DOMAN', a.cx, startY + creditBlock.length*step + fs*0.08);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.font = `600 ${Math.floor(fs*0.20)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.26)';
+    ctx.fillText('© 2026 NEO-VECTR INC® • ALL RIGHTS RESERVED', a.cx, canvas.height - fs*0.42);
+
+    ctx.font = `700 ${Math.floor(fs*0.20)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillText('PRESS ANYTHING TO RETURN', a.cx, canvas.height - fs*0.18);
+
+    applyBrightnessPass();
+  }
+
+function drawMenuScreen(now){
+    if (menuPage === 'SETTINGS') { drawSettingsScreen(now); return; }
+    if (menuPage === 'CREDITS') { drawCreditsScreen(now); return; }
+    const a = arena();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const t = now * 0.001;
+    const pulse = 0.12 + 0.06*Math.sin(t*2.0);
+
+    // Backdrop glow
+    const grd = ctx.createRadialGradient(a.cx, a.cy, a.r*0.1, a.cx, a.cy, a.r*1.25);
+    grd.addColorStop(0, 'rgba(70,0,95,0.35)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.98)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width, canvas.height);    // Title
+    const fs = Math.floor(Math.min(canvas.width, canvas.height) * 0.10);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const power = 0.75 + 0.25*Math.sin(t*2.0) + 0.20*(menuSel===0 ? 0.5 : 0);
+    
+    // MOTTO at top (above HUD) - ALWAYS VISIBLE
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.textBaseline = 'top';
+    ctx.font = `700 ${Math.floor(fs*0.22)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    ctx.fillText('FORGED IN SILENCE • BORN OF NEON', a.cx, fs*0.35);
+    ctx.textBaseline = 'middle'; // Reset
+    
+    // Company name subtitle
+    ctx.font = `600 ${Math.floor(fs*0.24)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    ctx.fillText('Neo-VECTR™ INC • ARCADE SYSTEMS', a.cx, a.cy*0.44);
+    
+    // Company (tube sign)
+    drawTubeText('NEO-VECTR', a.cx, a.cy*0.57, Math.floor(fs*0.95), 'rgba(175,75,255,ALPHA)', 0.95 + 0.20*pulse, 0.18, TITLE_INNER_PALETTE);
+    // Game title (tube sign)
+    drawTubeText('∞SNIP3', a.cx, a.cy*0.70, Math.floor(fs*0.60), 'rgba(120,255,255,ALPHA)', 0.75 + 0.25*pulse, 0.14);
+
+    // Menu list
+    const items = menuItems();
+    const layout = menuLayout(menuPage, items.length);
+    const baseY = layout.baseY;
+    const stepY = layout.stepY;
+    for (let i=0;i<items.length;i++){
+      const y = baseY + i*stepY;
+      const isSel = i === menuSel;
+      const glow = isSel ? 0.35 + 0.25*Math.sin(t*6.0) : 0.10;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.font = `${isSel ? 800 : 650} ${Math.floor(fs*0.42)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      ctx.fillStyle = `rgba(120,255,255,${glow})`;
+      {
+        // Dynamic selector arrow: size + x offset based on the current label width (works for any menu).
+        const label = items[i].labelFn ? items[i].labelFn(now) : items[i].label;
+        const metrics = ctx.measureText(label);
+        const leftEdge = a.cx - metrics.width*0.5;
+        const arrowGap = fs*0.32;
+        if (isSel) {
+          ctx.fillText('▶', leftEdge - arrowGap, y);
+        }
+      }
+      const label = items[i].labelFn ? items[i].labelFn(now) : items[i].label;
+      ctx.fillText(label, a.cx, y);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // Help text
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.font = `500 ${Math.floor(fs*0.24)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillText('ENTER/A: select • ↑/↓: navigate • ESC/B: back', a.cx, canvas.height - fs*0.25);
+
+    applyBrightnessPass();
+  }
+
+  function drawVictoryScreen(now){
+    const a = arena();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const t = now * 0.001;
+    const pulse = 0.10 + 0.08*Math.sin(t*3.0);
+
+    const grd = ctx.createRadialGradient(a.cx, a.cy, a.r*0.05, a.cx, a.cy, a.r*1.25);
+    grd.addColorStop(0, 'rgba(70,0,95,0.40)');
+    grd.addColorStop(1, 'rgba(0,0,0,0.99)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    const fs = Math.floor(Math.min(canvas.width, canvas.height) * 0.10);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Header
+    drawTubeText('ROUND OVER', a.cx, a.cy*0.40, Math.floor(fs*0.70), 'rgba(175,75,255,ALPHA)', 0.80 + 0.20*pulse, 0.16);
+
+    const winLabel = (winnerId >= 0) ? `PLAYER ${winnerId+1} WINS` : 'WINNER';
+    const c = colorForIndex((winnerId>=0)?winnerId:0);
+    neonText(winLabel, a.cx, a.cy*0.55, Math.floor(fs*0.62), c, 0.95, 0.20);
+
+    ctx.font = `600 ${Math.floor(fs*0.28)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.30)';
+    ctx.fillText('Last alive wins.', a.cx, a.cy*0.65);
+
+    ctx.textBaseline = 'bottom';
+    ctx.font = `600 ${Math.floor(fs*0.24)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillText('PRESS ANYTHING TO RETURN', a.cx, canvas.height - fs*0.25);
+
+    applyBrightnessPass();
+  }
+
+
+  // ---------------------------
+  // Pause overlay (ESC during gameplay)
+  // ---------------------------
+  function pauseItems(){
+    return [
+      { label: 'RESUME', action: ()=> { appMode = 'GAME'; pauseEnterT0 = 0; keys.delete('Escape'); } },
+      { label: 'MAIN MENU', action: ()=> { goMenu(); } },
+    ];
+  }
+
+  function drawPauseOverlay(now){
+    // Draw dim + centered panel on top of the current game frame.
+    const a = arena();
+    const fs = Math.min(canvas.width, canvas.height);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    const w = Math.min(canvas.width*0.62, fs*0.70);
+    const h = Math.min(canvas.height*0.46, fs*0.50);
+    const x = (canvas.width - w)*0.5;
+    const y = (canvas.height - h)*0.5;
+
+    // panel glow
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(120,255,255,0.18)';
+    ctx.lineWidth = 10;
+    ctx.strokeRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(120,255,255,0.35)';
+    ctx.lineWidth = 2.2;
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(10,12,18,0.72)';
+    ctx.fillRect(x, y, w, h);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = `800 ${Math.floor(fs*0.045)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillText('PAUSED', x + w*0.5, y + fs*0.020);
+
+    ctx.font = `700 ${Math.floor(fs*0.022)}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+    ctx.fillStyle = 'rgba(255,255,255,0.70)';
+    ctx.fillText(`SEED: ${currentSeed}`, x + w*0.5, y + fs*0.090);
+
+    // Options
+    const items = pauseItems();
+    const baseY = y + h*0.55;
+    const stepY = fs*0.055;
+    for (let i=0;i<items.length;i++){
+      const yy = baseY + i*stepY;
+      const sel = (i===pauseSel);
+      ctx.font = `800 ${Math.floor(fs*0.040)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+      ctx.fillStyle = sel ? 'rgba(255,255,255,0.98)' : 'rgba(255,255,255,0.40)';
+      ctx.fillText(items[i].label, x + w*0.5, yy);
+      if (sel){
+        // underline flicker
+        const t = now*0.001;
+        const a = 0.45 + 0.30*Math.sin(t*14);
+        ctx.strokeStyle = `rgba(255,255,255,${a})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x + w*0.25, yy + fs*0.048);
+        ctx.lineTo(x + w*0.75, yy + fs*0.048);
+        ctx.stroke();
+      }
+    }
+
+    ctx.textBaseline = 'bottom';
+    ctx.font = `600 ${Math.floor(fs*0.020)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillText('ESC: resume   ENTER/A: select', x + w*0.5, y + h - fs*0.030);
+  }
+
+  function resetP1Systems(){
+    // Clear transient combat state so swapping player count is always safe for testing.
+    lasers.length = 0;
+    sparks.length = 0;
+    charging = false;
+    charge = 0;
+    chargeHeld = 0;
+    chargeFullBlink = 0;
+    chargeLockUntilRelease = false;
+    chargeAutoFired = false;
+
+    shootCooldown = 0;
+
+    // Boost state
+    prevShiftHeld = false;
+    boostCharging = false;
+    boostCharge = 0;
+    boostLockUntilRelease = false;
+    boostDash1Pending = false;
+    boostDash1Timer = 0;
+    boostCooldown = 0;
+    boostFx = 0;
+    boostWindowLeft = 0;
+    boostWindowT = 0;
+    boostSecondUsed = false;
+  }
+
+  function setPlayerCount(n){
+    const nn = Math.max(1, Math.min(8, (n|0) || 1));
+    if (nn === playerCount) return;
+    playerCount = nn;
+    initPlayers();
+    resetP1Systems();
+    log('INFO', `Player count set to ${playerCount}`);
+  }
+
+  // Hook dropdown
+  const playerCountSel = document.getElementById('playerCount');
+  if (playerCountSel) {
+    playerCountSel.value = String(playerCount);
+    playerCountSel.addEventListener('change', () => setPlayerCount(parseInt(playerCountSel.value, 10)));
+  }
+
+  initPlayers();
+
+  // ---------------------------
+  // Update loop (fixed timestep)
+  // ---------------------------
+  let last = performance.now();
+  let acc = 0;
+  const dtFixed = 1/120;
+
+  let perfFrames = 0, perfTimer = 0;
+
+  function step(dt){
+    tSec += dt;
+    
+    // Update lobby overlay timer
+    updateLobbyOverlay(dt);
+
+    const p1 = players[0];
+
+    // Arrow-aim override (press left/right) until the mouse moves again.
+    if (mouseMoved) {
+      aimMode = 'mouse';
+      mouseMoved = false;
+    }
+
+    const arrowDir = (keys.has('ArrowLeft') ? -1 : 0) + (keys.has('ArrowRight') ? 1 : 0);
+    if (arrowDir !== 0) {
+      if (aimMode !== 'arrows') {
+        aimMode = 'arrows';
+        aimAngle = Math.atan2(p1.aimY, p1.aimX);
+      }
+      const AIM_RATE = 3.6; // rad/sec
+      aimAngle = ang01(aimAngle + arrowDir * AIM_RATE * dt);
+    } else if (aimMode === 'mouse') {
+      // Keep the stored angle in sync so switching feels seamless.
+      aimAngle = Math.atan2(p1.aimY, p1.aimX);
+    }
+
+    const p1Input = sampleP1();
+
+    // P1 charge shot (Space) + ArrowUp (tap fire / hold charge)
+    const spaceHeld = keys.has('Space');
+
+    const arrowUpHeld = keys.has('ArrowUp');
+    const arrowUpPressed = arrowUpHeld && !prevArrowUpHeld;
+    const arrowUpReleased = !arrowUpHeld && prevArrowUpHeld;
+    prevArrowUpHeld = arrowUpHeld;
+
+    if (arrowUpPressed) {
+      arrowUpHeldTime = 0;
+      arrowUpHoldCharging = false;
+    }
+    if (arrowUpHeld) {
+      arrowUpHeldTime += dt;
+      if (!arrowUpHoldCharging && arrowUpHeldTime >= ARROWUP_HOLD_TO_CHARGE) {
+        arrowUpHoldCharging = true;
+      }
+    }
+
+    // Combined hold input for charging (either Space, or ArrowUp after hold threshold)
+    const chargeHeldInput = spaceHeld || (arrowUpHeld && arrowUpHoldCharging);
+
+    if (!chargeHeldInput && chargeLockUntilRelease) chargeLockUntilRelease = false;
+
+    if (chargeHeldInput && !charging && !chargeLockUntilRelease) {
+      charging = true;
+      chargeHeld = 0;
+      chargeFullBlink = 0;
+      chargeAutoFired = false;
+      log('INFO', 'Charge start');
+    }
+    if (charging && chargeHeldInput) {
+      chargeHeld += dt;
+      charge = clamp(chargeHeld / CHARGE_TIME, 0, 1);
+      if (charge >= 0.999) chargeFullBlink += dt;
+
+      if (charge >= 0.999 && !chargeAutoFired) {
+        spawnLaserFromP1(1.0);
+        shootCooldown = Math.max(shootCooldown, 0.18);
+        chargeAutoFired = true;
+        chargeLockUntilRelease = true;
+        charging = false;
+        charge = 0;
+        chargeHeld = 0;
+        chargeFullBlink = 0;
+        log('INFO', 'Charge auto-fire (100%)');
+      }
+    }
+
+    // ArrowUp tap = click shot (only if we did NOT enter hold-to-charge)
+    // (We do this on release so a quick tap fires once.)
+    if (arrowUpReleased && !arrowUpHoldCharging && !charging) {
+      if (shootCooldown <= 0) {
+        spawnLaserFromP1(0.15);
+        shootCooldown = LASER_COOLDOWN;
+      }
+    }
+
+    // Release charge when neither input is held anymore
+    if (!chargeHeldInput && charging) {
+      if (charge >= 0.20) {
+        spawnLaserFromP1(charge);
+        shootCooldown = Math.max(shootCooldown, 0.18);
+      }
+      charging = false;
+      charge = 0;
+      chargeHeld = 0;
+      chargeFullBlink = 0;
+      log('INFO', 'Charge release');
+    }
+
+    // P1 fire
+    shootCooldown = Math.max(0, shootCooldown - dt);
+    const mousePressed = mouseDown && !prevMouseDown;
+    const gpPressed = p1Input.gpFire && !prevP1GpFire;
+    if (!charging && (mousePressed || gpPressed) && shootCooldown <= 0) {
+      spawnLaserFromP1(0.15);
+      shootCooldown = LASER_COOLDOWN;
+    }
+    prevMouseDown = mouseDown;
+    prevP1GpFire = p1Input.gpFire;
+
+    // Movement tuning
+    const SPEED = 420;
+    const SNAPPY = 18.0;
+
+    // --- Update each player ---
+    for (let i=0;i<players.length;i++){
+      const p = players[i];
+
+      // Inputs
+      let move = {x:0,y:0,mag:0};
+      let aim = {x:p.aimX,y:p.aimY,active:false};
+      let hasControl = false;
+
+      if (i === 0) {
+        move = p1Input.move;
+        aim = p1Input.aim;
+        hasControl = true;
+      } else {
+        // Players 2-4: prefer gamepads 1-3 (indices 1..3)
+        const gp = sampleGamepadForPlayer(i, i-1); // P1 is keyboard/mouse; P2.. map to pads 0.. (no double-control)
+        if (gp) {
+          move = gp.move;
+          aim = gp.aim;
+          hasControl = true;
+        }
+      }
+
+      // Fallback: drift so you still see 4 players even without controllers
+      if (!hasControl) {
+        p.driftT += dt;
+        const mid = (p.angMin + p.angMax) * 0.5;
+        const wob = 0.30 * Math.sin(p.driftT * (0.55 + 0.12*p.id));
+        const ang = mid + wob;
+        const a = arena();
+        const rr = a.r * (0.40 + 0.06*Math.sin(p.driftT * 0.9 + p.id));
+        const tx = a.cx + Math.cos(ang) * rr;
+        const ty = a.cy + Math.sin(ang) * rr;
+        const ddx = tx - p.x;
+        const ddy = ty - p.y;
+        const n = norm(ddx,ddy);
+        move = { x: n.x, y: n.y, mag: clamp(n.l/80,0,0.55) };
+        aim = { x: Math.cos(ang), y: Math.sin(ang), active: true };
+      }
+
+      // Remember last meaningful move direction
+      if (move.mag > 0.18) {
+        p.lastMoveX = move.x;
+        p.lastMoveY = move.y;
+      }
+
+      // Velocity chase
+      const targetVx = move.x * SPEED;
+      const targetVy = move.y * SPEED;
+      p.vx += (targetVx - p.vx) * (SNAPPY * dt);
+      p.vy += (targetVy - p.vy) * (SNAPPY * dt);
+
+      // P1 boost (Shift): uses last move dir
+      if (i === 0) {
+        boostCooldown = Math.max(0, boostCooldown - dt);
+        boostFx = Math.max(0, boostFx - dt);
+
+        const shiftHeld = keys.has('ShiftLeft') || keys.has('ShiftRight');
+        const shiftPressed = shiftHeld && !prevShiftHeld;
+        const shiftReleased = !shiftHeld && prevShiftHeld;
+        prevShiftHeld = shiftHeld;
+
+        if (shiftReleased && boostLockUntilRelease) boostLockUntilRelease = false;
+
+        const doDash = (impulse, label) => {
+          const dir = norm(p.lastMoveX, p.lastMoveY);
+          const bx = (dir.l > 1e-6) ? dir.x : p.aimX;
+          const by = (dir.l > 1e-6) ? dir.y : p.aimY;
+          p.vx += bx * impulse;
+          p.vy += by * impulse;
+          boostFx = BOOST_FX_TIME;
+          playBoost();
+          log('INFO', label);
+        };
+
+        if (shiftPressed && !boostLockUntilRelease && boostCooldown <= 0 && boostWindowLeft <= 0 && !boostDash1Pending) {
+          boostDash1Pending = true;
+          boostDash1Timer = BOOST_START_DELAY;
+          boostCharging = true;
+          boostCharge = 0;
+        }
+
+        if (boostDash1Pending && shiftReleased) {
+          boostDash1Pending = false;
+          boostDash1Timer = 0;
+          boostCharging = false;
+          boostCharge = 0;
+        }
+
+        if (boostDash1Pending) {
+          boostDash1Timer = Math.max(0, boostDash1Timer - dt);
+          boostCharge = 1 - (boostDash1Timer / BOOST_START_DELAY);
+          if (boostDash1Timer <= 0) {
+            boostDash1Pending = false;
+            doDash(BOOST_IMPULSE_MIN, 'Boost dash (1)');
+            boostWindowLeft = BOOST_DOUBLE_WINDOW;
+            boostWindowT = 0;
+            boostSecondUsed = false;
+            boostCharge = 0;
+          }
+        }
+        if (boostWindowLeft > 0) {
+          boostWindowLeft = Math.max(0, boostWindowLeft - dt);
+          boostWindowT += dt;
+          boostCharge = clamp(boostWindowT / BOOST_DOUBLE_WINDOW, 0, 1);
+
+          // Second dash behavior:
+          // - Press Shift again within the window => dash (2)
+          // - Hold Shift => auto dash (2) after a short delay (clean double-dash)
+          if (!boostSecondUsed) {
+            if (shiftPressed && boostWindowT > 0.02) {
+              boostSecondUsed = true;
+              doDash(BOOST_IMPULSE_MAX, 'Boost dash (2)');
+              boostWindowLeft = 0;
+            } else if (shiftHeld && boostWindowT >= BOOST_HOLD_TO_DOUBLE_DELAY) {
+              boostSecondUsed = true;
+              doDash(BOOST_IMPULSE_MAX, 'Boost dash (2)');
+              boostWindowLeft = 0;
+            }
+          }
+
+          // Window ends naturally; we do NOT cancel it on release (so you can tap-tap).
+          if (boostWindowLeft <= 0) {
+
+            boostCharging = false;
+            boostCharge = 0;
+            boostCooldown = BOOST_COOLDOWN;
+            boostLockUntilRelease = shiftHeld;
+          }
+        }
+      }
+
+      // Integrate position
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+
+      // Aim persistence
+      if (aim.active) {
+        p.aimX = aim.x;
+        p.aimY = aim.y;
+      }
+
+      // Slice constraints
+      constrainToSlice(p);
+
+      // One barrier per slice (inside each slice)
+      collidePlayerWithBarrier(p);
+
+      // Trail
+      p.trail.push({x:p.x, y:p.y});
+      if (p.trail.length > p.trailMax) p.trail.shift();
+    }
+
+    // Lasers update + ricochet off screen edges
+    const minX = LASER_RADIUS;
+    const maxX = canvas.width  - LASER_RADIUS;
+    const minY = LASER_RADIUS;
+    const maxY = canvas.height - LASER_RADIUS;
+
+    for (let i = lasers.length - 1; i >= 0; i--) {
+      const L = lasers[i];
+      L.px = L.x;
+      L.py = L.y;
+      L.x += L.vx * dt;
+      L.y += L.vy * dt;
+      L.life += dt;
+
+      let bounced = false;
+
+      // Barrier ricochet (one per slice). Check movement segment vs each barrier.
+      // Kept lightweight: first hit only per step.
+      if (barriers.length) {
+        for (const B of barriers) {
+          const t = segmentsIntersect(L.px, L.py, L.x, L.y, B.x0, B.y0, B.x1, B.y1);
+          if (t !== null) {
+            const hx = L.px + (L.x - L.px) * t;
+            const hy = L.py + (L.y - L.py) * t;
+            // Segment normal
+            const sx = B.x1 - B.x0;
+            const sy = B.y1 - B.y0;
+            let nx = -sy, ny = sx;
+            const nn = Math.hypot(nx,ny) || 1;
+            nx /= nn; ny /= nn;
+            // Flip normal to face incoming velocity
+            if (L.vx*nx + L.vy*ny > 0) { nx = -nx; ny = -ny; }
+            const rv = reflectVelocity(L.vx, L.vy, nx, ny, 0.90);
+            L.vx = rv.vx;
+            L.vy = rv.vy;
+            const sp = Math.hypot(L.vx, L.vy) || 1;
+            L.dirX = L.vx / sp;
+            L.dirY = L.vy / sp;
+            // Nudge out of barrier
+            L.x = hx + L.dirX * 2.0;
+            L.y = hy + L.dirY * 2.0;
+            bounced = true;
+            break;
+          }
+        }
+      }
+
+      if (L.x <= minX) { L.x = minX + (minX - L.x); L.vx = Math.abs(L.vx) * 0.90; bounced = true; }
+      else if (L.x >= maxX) { L.x = maxX - (L.x - maxX); L.vx = -Math.abs(L.vx) * 0.90; bounced = true; }
+
+      if (L.y <= minY) { L.y = minY + (minY - L.y); L.vy = Math.abs(L.vy) * 0.90; bounced = true; }
+      else if (L.y >= maxY) { L.y = maxY - (L.y - maxY); L.vy = -Math.abs(L.vy) * 0.90; bounced = true; }
+
+      if (bounced) {
+        if ((L.bouncesLeft|0) > 0) {
+          L.bouncesLeft--;
+          const sp = Math.hypot(L.vx, L.vy) || 1;
+          L.dirX = L.vx / sp;
+          L.dirY = L.vy / sp;
+          playRicochetSfx();
+          spawnExplosion(L.x, L.y, 0.22 + 0.25*L.power);
+        } else {
+          spawnExplosion(L.x, L.y, 0.65 + 0.55*L.power);
+          playRicochetSfx();
+          lasers.splice(i, 1);
+          continue;
+        }
+      }
+
+      if (L.safeTime !== undefined) L.safeTime = Math.max(0, L.safeTime - dt);
+      // Player hits
+      const PLAYER_HIT_R = 18;
+      if (!L.noSelfHit && ((L.safeTime ?? 0) <= 0)) {
+        if (gameMode === 'VS') {
+          let removed = false;
+          for (const p of players) {
+            if (!p.alive) continue;
+            // Self-hit only after first bounce, just like SNIP3.
+            if (p.id === (L.ownerId ?? -999) && ((L.bouncesLeft|0) >= 2)) continue;
+            const tHit = intersectSegmentCircle(L.px, L.py, L.x, L.y, p.x, p.y, PLAYER_HIT_R);
+            if (tHit !== null) {
+              const hx = L.px + (L.x - L.px) * tHit;
+              const hy = L.py + (L.y - L.py) * tHit;
+              eliminatePlayer(p, hx, hy, (L.ownerId ?? -1));
+              lasers.splice(i, 1);
+              removed = true;
+              break;
+            }
+          }
+          if (removed) continue;
+        } else {
+          // SNIP3: only P1 self-hit after at least one bounce.
+          if (((L.bouncesLeft|0) < 2)) {
+            const tHit = intersectSegmentCircle(L.px, L.py, L.x, L.y, players[0].x, players[0].y, PLAYER_HIT_R);
+            if (tHit !== null) {
+              const hx = L.px + (L.x - L.px) * tHit;
+              const hy = L.py + (L.y - L.py) * tHit;
+              triggerSelfHit(hx, hy);
+              lasers.splice(i, 1);
+              continue;
+            }
+          }
+        }
+      }
+
+      const out = (L.x < -200 || L.y < -200 || L.x > canvas.width + 200 || L.y > canvas.height + 200);
+      if (L.life >= L.maxLife || out) lasers.splice(i, 1);
+    }
+
+    updateSparks(dt);
+  }
+
+  // Perf summaries
+  function logPerf(ms, fps){ log('INFO', `Perf: ${fps.toFixed(1)} fps, ${(ms).toFixed(2)} ms/frame (avg)`); }
+
+  window.addEventListener('gamepadconnected', (e) => log('INFO', `Gamepad connected: ${e.gamepad.id}`));
+  window.addEventListener('gamepaddisconnected', (e) => log('INFO', `Gamepad disconnected: ${e.gamepad.id}`));
+
+  // ---------------------------
+  // Main loop
+  // ---------------------------
+  function frameLoop(){
+    const now = performance.now();
+    // Always update audio debug panel (cheap).
+    updateAudioStatus();
+    let dt = (now - last) / 1000;
+    last = now;
+    dt = Math.min(dt, 0.05);
+    acc += dt;
+
+    // ---------------------------
+    // Update (fixed timestep) — GAME only
+    // ---------------------------
+    if (appMode === 'GAME') {
+      while (acc >= dtFixed) {
+        step(dtFixed);
+        acc -= dtFixed;
+      }
+    } else {
+      // Avoid spiral when sitting on menu/boot.
+      acc = 0;
+    }
+
+    // ---------------------------
+    // Render by mode
+    // ---------------------------
+    if (appMode === 'BOOT_WAIT') {
+       // Allow controllers to "press anything" without clicking.
+       if (anyGamepadPressed()) firstInteraction();
+      drawBootWait(now);
+      requestAnimationFrame(frameLoop);
+      return;
+    }
+
+    if (appMode === 'BOOT') {
+      drawBootScreen(now);
+      requestAnimationFrame(frameLoop);
+      return;
+    }
+
+    if (appMode === 'MENU') {
+      // menu navigation (edge-triggered)
+      const up = keys.has('ArrowUp');
+      const down = keys.has('ArrowDown');
+      const enter = keys.has('Enter');
+      const left = keys.has('ArrowLeft');
+      const right = keys.has('ArrowRight');
+      const esc = keys.has('Escape');
+
+      // Controller navigation (D-pad / left stick) + A/Start to select
+      let gpUp = false, gpDown = false, gpLeft = false, gpRight = false, gpSelect = false, gpBack = false;
+      const pads = getConnectedGamepads();
+      if (pads.length) {
+        const gp = pads[0].pad;
+        const ay = (gp.axes && gp.axes.length) ? gp.axes[1] : 0;
+        gpUp = (gp.buttons && gp.buttons[12] && gp.buttons[12].pressed) || (ay < -0.55);
+        gpDown = (gp.buttons && gp.buttons[13] && gp.buttons[13].pressed) || (ay > 0.55);
+        gpLeft  = (gp.buttons && gp.buttons[14] && gp.buttons[14].pressed) || ((gp.axes&&gp.axes.length)? gp.axes[0] < -0.55 : false);
+        gpRight = (gp.buttons && gp.buttons[15] && gp.buttons[15].pressed) || ((gp.axes&&gp.axes.length)? gp.axes[0] >  0.55 : false);
+        gpSelect = (gp.buttons && ((gp.buttons[0] && gp.buttons[0].pressed) || (gp.buttons[9] && gp.buttons[9].pressed)));
+        gpBack = (gp.buttons && ((gp.buttons[1] && gp.buttons[1].pressed) || (gp.buttons[8] && gp.buttons[8].pressed)));
+      }
+
+      const items = menuItems();
+
+      // Left/Right adjustments (Settings sliders)
+      const cur = items[menuSel];
+      if (menuPage === 'SETTINGS') {
+        if ((left || gpLeft) && !(prevMenuLeft || prevGpLeft)) { if (cur && cur.onLeft) { cur.onLeft(); playMenuSwitchSfx(); } }
+        if ((right || gpRight) && !(prevMenuRight || prevGpRight)) { if (cur && cur.onRight) { cur.onRight(); playMenuSwitchSfx(); } }
+      }
+
+
+      if ((up || gpUp) && !(prevMenuUp || prevGpUp)) menuSel = (menuSel - 1 + items.length) % items.length;
+      if ((down || gpDown) && !(prevMenuDown || prevGpDown)) menuSel = (menuSel + 1) % items.length;
+      if ((enter || gpSelect) && !(prevMenuEnter || prevGpSelect)) { playMenuSelectSfx(); items[menuSel].action(); }
+      if ((esc && !prevMenuEsc) || (gpBack && !prevGpBack)) {
+        if (menuPage !== 'MAIN') { menuPage = 'MAIN'; menuSel = 0; playMenuSwitchSfx(); }
+      }      // Credits: press anything to return (with a small debounce so the key that opened Credits doesn't instantly close it)
+      if (menuPage === 'CREDITS' && (performance.now() - menuPageEnterT0) > 250) {
+        const anyJust =
+          (up && !prevMenuUp) || (down && !prevMenuDown) || (left && !prevMenuLeft) || (right && !prevMenuRight) ||
+          (enter && !prevMenuEnter) || (esc && !prevMenuEsc) ||
+          (gpUp && !prevGpUp) || (gpDown && !prevGpDown) || (gpLeft && !prevGpLeft) || (gpRight && !prevGpRight) ||
+          (gpSelect && !prevGpSelect) || (gpBack && !prevGpBack) ||
+          (mouseDown && !menuClickDown);
+        if (anyJust) { menuPage = 'MAIN'; menuSel = 0; menuPageEnterT0 = performance.now(); playMenuSwitchSfx(); }
+      }
+      prevMenuUp = up; prevMenuDown = down; prevMenuEnter = enter; prevMenuLeft = left; prevMenuRight = right; prevMenuEsc = esc;
+      prevGpUp = gpUp; prevGpDown = gpDown; prevGpSelect = gpSelect; prevGpLeft = gpLeft; prevGpRight = gpRight; prevGpBack = gpBack;
+
+      // mouse hover selects item; click activates
+      const layout = menuLayout(menuPage, items.length);
+      const fb = fbFromClient(mouseX, mouseY);
+      const fbX = fb.x;
+      const fbY = fb.y;
+      const hoverIdx = Math.round((fbY - layout.baseY) / layout.stepY);
+      if (fbX >= layout.left && fbX <= layout.right && hoverIdx >= 0 && hoverIdx < items.length) {
+        menuSel = hoverIdx;
+      }
+
+      // Click/drag
+      if (mouseDown && !menuClickDown) {
+        menuClickDown = true;
+        menuDragKey = null;
+        if (fbX >= layout.left && fbX <= layout.right && hoverIdx >= 0 && hoverIdx < items.length) {
+          const it = items[menuSel];
+          if (menuPage === 'SETTINGS' && it.kind === 'slider' && typeof it.dragFn === 'function') {
+            menuDragKey = it.key;
+          } else {
+            playMenuSelectSfx();
+            it.action();
+          }
+        }
+      }
+
+      // While dragging, continuously update slider from mouse X.
+      if (mouseDown && menuDragKey && menuPage === 'SETTINGS') {
+        const it = items[menuSel];
+        if (it && it.kind === 'slider' && it.key === menuDragKey && typeof it.dragFn === 'function') {
+          const t = clamp((fbX - layout.sliderLeft) / (layout.sliderRight - layout.sliderLeft), 0, 1);
+          it.dragFn(t);
+        }
+      }
+
+      if (!mouseDown) {
+        menuClickDown = false;
+        menuDragKey = null;
+      }
+
+      // Play switch sound exactly when the selection changes.
+      if (menuSel !== prevMenuSel) {
+        playMenuSwitchSfx();
+        prevMenuSel = menuSel;
+      }
+
+      drawMenuScreen(now);
+      requestAnimationFrame(frameLoop);
+      return;
+    }
+
+    if (appMode === 'VICTORY') {
+      victoryTimer = (now - victoryEnterT0) * 0.001;
+      // Press anything to return to menu (debounced a little)
+      const pads = getConnectedGamepads();
+      const gpAny = pads.some(p => p.pad.buttons && p.pad.buttons.some(b => b && b.pressed));
+      const keyAny = keys.size > 0;
+      const mouseAny = mouseDown;
+      if (victoryTimer > 0.25 && (gpAny || keyAny || mouseAny)) {
+        // clear keys so we don't immediately re-trigger actions
+        keys.clear();
+        appMode = 'MENU';
+        menuPage = 'MAIN';
+        menuSel = 0;
+        menuPageEnterT0 = performance.now();
+        playMenuSwitchSfx();
+        startMenuMusic();
+      }
+      drawVictoryScreen(now);
+      requestAnimationFrame(frameLoop);
+      return;
+    }
+
+
+    if (appMode === 'PAUSE') {
+      // Pause navigation (does not advance simulation)
+      const up = keys.has('ArrowUp');
+      const down = keys.has('ArrowDown');
+      const enter = keys.has('Enter');
+      const esc = keys.has('Escape');
+
+      // Controller (A/Start select, B/Back resume)
+      let gpUp = false, gpDown = false, gpSelect = false, gpBack = false;
+      const pads = getConnectedGamepads();
+      if (pads.length) {
+        const gp = pads[0].pad;
+        const ay = (gp.axes && gp.axes.length) ? gp.axes[1] : 0;
+        gpUp = (gp.buttons && gp.buttons[12] && gp.buttons[12].pressed) || (ay < -0.55);
+        gpDown = (gp.buttons && gp.buttons[13] && gp.buttons[13].pressed) || (ay > 0.55);
+        gpSelect = (gp.buttons && ((gp.buttons[0] && gp.buttons[0].pressed) || (gp.buttons[9] && gp.buttons[9].pressed)));
+        gpBack = (gp.buttons && ((gp.buttons[1] && gp.buttons[1].pressed) || (gp.buttons[8] && gp.buttons[8].pressed)));
+      }
+
+      const items = pauseItems();
+      if ((up || gpUp) && !(prevMenuUp || prevGpUp)) pauseSel = (pauseSel - 1 + items.length) % items.length;
+      if ((down || gpDown) && !(prevMenuDown || prevGpDown)) pauseSel = (pauseSel + 1) % items.length;
+      if ((enter || gpSelect) && !(prevMenuEnter || prevGpSelect)) { playMenuSelectSfx(); items[pauseSel].action(); }
+      if ((esc && !prevMenuEsc) || (gpBack && !prevGpBack)) {
+        // Resume
+        appMode = 'GAME';
+        keys.delete('Escape');
+      }
+
+      prevMenuUp = up; prevMenuDown = down; prevMenuEnter = enter; prevMenuEsc = esc;
+      prevGpUp = gpUp; prevGpDown = gpDown; prevGpSelect = gpSelect; prevGpBack = gpBack;
+
+      // Render the world as-is (no stepping), then overlay.
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0,0,canvas.width, canvas.height);
+
+      drawCrosshair();
+      drawArenaRing();
+      drawPlayerSlices();
+      drawBarriers();
+
+      if (settings.seedOverlay) {
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        const px = Math.floor(Math.min(canvas.width, canvas.height) * 0.020);
+        ctx.font = `600 ${px}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+        ctx.fillStyle = `rgba(255,255,255,0.55)`;
+        ctx.fillText(`SEED: ${currentSeed}`, 14, 14);
+      }
+
+      for (const p of players) drawPlayerTrail(p);
+      drawLasers();
+      drawSparks();
+      for (let i=0;i<players.length;i++) drawPlayerShip(players[i], i===0);
+      drawTouchSticks();
+      applyBrightnessPass();
+
+      drawPauseOverlay(now);
+      requestAnimationFrame(frameLoop);
+      return;
+    }
+
+    // ---------------------------
+    // GAME render (existing)
+    // ---------------------------
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    // Player-only shake (P1) — charge only (no boost shake)
+    playerShakeX = 0;
+    playerShakeY = 0;
+    sliceShakeAng = 0;
+
+    if (charging) {
+      const t = now * 0.001;
+
+        const full = charge >= 0.999;
+        const freq = full ? 80 : 40;
+        const ampBase = 0.22 + 1.05*charge; // subtle
+        const amp = full ? ampBase * 1.15 : ampBase;
+        let sx = Math.sin(t*freq*1.00) * amp + Math.sin(t*freq*2.07) * (amp*0.55);
+        let sy = Math.cos(t*freq*1.13) * amp + Math.sin(t*freq*1.71) * (amp*0.45);
+        if (full) {
+          const pulse = 0.6 + 0.4*Math.sin(chargeFullBlink * 22);
+          sx *= pulse;
+          sy *= pulse;
+        }
+        playerShakeX += sx;
+        playerShakeY += sy;
+
+      playerShakeX = clamp(playerShakeX, -3, 3);
+      playerShakeY = clamp(playerShakeY, -3, 3);
+
+      // Visual-only wedge jitter: shake the whole slice slightly while charging.
+      // Kept tiny so seams remain readable.
+      const sAmp = (0.0008 + 0.0032*charge) * (full ? 1.35 : 1.0);
+      sliceShakeAng = (Math.sin(t*55) + Math.sin(t*91)*0.5) * sAmp;
+    }
+
+    drawCrosshair();
+    drawArenaRing();
+    drawPlayerSlices();
+    drawBarriers();
+
+    // Seed overlay (always available even when debug HUD hidden)
+    if (settings.seedOverlay) {
+      const age = performance.now() - seedT0;
+      if (age < 6500) {
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        const px = Math.floor(Math.min(canvas.width, canvas.height) * 0.020);
+        ctx.font = `600 ${px}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+        const a = 0.55 * (1 - (age/6500));
+        ctx.fillStyle = `rgba(255,255,255,${a})`;
+        ctx.fillText(`SEED: ${currentSeed}`, 14, 14);
+      }
+    }
+
+    for (const p of players) drawPlayerTrail(p);
+
+    drawLasers();
+    drawSparks();
+
+    // Draw players on top
+    for (let i=0;i<players.length;i++) {
+      drawPlayerShip(players[i], i===0);
+    }
+
+    drawTouchSticks();
+    drawLobbyOverlay(); // NEW: Draw lobby overlay if visible
+
+    applyBrightnessPass();
+
+    // ESC toggles pause (does not reset the run)
+    if (keys.has('Escape')) {
+      appMode = 'PAUSE';
+      pauseSel = 0;
+      pauseEnterT0 = performance.now();
+      keys.delete('Escape');
+    }
+
+    // perf tracking
+    perfFrames += 1;
+    perfTimer += dt;
+    if (perfTimer >= 5.0) {
+      const fps = perfFrames / perfTimer;
+      const ms = (perfTimer / perfFrames) * 1000;
+      logPerf(ms, fps);
+      perfFrames = 0; perfTimer = 0;
+    }
+
+    requestAnimationFrame(frameLoop);
+  }
+
+  log('INFO', 'Starting main loop');
+  requestAnimationFrame(frameLoop);
+})();
+</script>
+</body>
+</html>
