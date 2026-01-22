@@ -1044,7 +1044,7 @@ window.addEventListener('keyup', (e) => {
     // - stays inside each slice with angular margins
     // - spawns OUTSIDE the interior barrier (so players don't insta-kill)
     // - enforces minimum separation; falls back to evenly spaced if needed
-    const a = arena;
+    const a = arena();
     const sliceA0 = -Math.PI/2;
     const sliceW  = TAU / Math.max(1, playerCount);
 
@@ -2975,9 +2975,26 @@ function drawMenuScreen(now){
 
     const power = 0.75 + 0.25*Math.sin(t*2.0) + 0.20*(menuSel===0 ? 0.5 : 0);
     
+    // Rainbow infinity symbol at top
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.textBaseline = 'top';
+    const infSize = Math.floor(fs*0.35);
+    ctx.font = `900 ${infSize}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    // Rainbow cycling through spectrum
+    const rainbowPhase = (t * 2.0) % 6;
+    let r, g, b;
+    if (rainbowPhase < 1) { r = 255; g = Math.floor(rainbowPhase * 255); b = 0; }
+    else if (rainbowPhase < 2) { r = Math.floor((2 - rainbowPhase) * 255); g = 255; b = 0; }
+    else if (rainbowPhase < 3) { r = 0; g = 255; b = Math.floor((rainbowPhase - 2) * 255); }
+    else if (rainbowPhase < 4) { r = 0; g = Math.floor((4 - rainbowPhase) * 255); b = 255; }
+    else if (rainbowPhase < 5) { r = Math.floor((rainbowPhase - 4) * 255); g = 0; b = 255; }
+    else { r = 255; g = 0; b = Math.floor((6 - rainbowPhase) * 255); }
+    const alpha = 0.55 + 0.25 * Math.sin(t * 3.5);
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.fillText('∞', a.cx, fs*0.05);
+    
     // MOTTO at top (above HUD) - ALWAYS VISIBLE
     ctx.globalCompositeOperation = 'source-over';
-    ctx.textBaseline = 'top';
     ctx.font = `700 ${Math.floor(fs*0.22)}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
     ctx.fillStyle = 'rgba(255,255,255,0.28)';
     ctx.fillText('FORGED IN SILENCE • BORN OF NEON', a.cx, fs*0.35);
