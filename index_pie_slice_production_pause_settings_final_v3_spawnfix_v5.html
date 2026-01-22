@@ -2975,23 +2975,24 @@ function drawMenuScreen(now){
 
     const power = 0.75 + 0.25*Math.sin(t*2.0) + 0.20*(menuSel===0 ? 0.5 : 0);
     
-    // Rainbow infinity symbol at top
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.textBaseline = 'top';
-    const infSize = Math.floor(fs*0.35);
-    ctx.font = `900 ${infSize}px system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+    // Rainbow infinity symbol at top - LARGE and prominent
     // Rainbow cycling through spectrum
-    const rainbowPhase = (t * 2.0) % 6;
-    let r, g, b;
-    if (rainbowPhase < 1) { r = 255; g = Math.floor(rainbowPhase * 255); b = 0; }
-    else if (rainbowPhase < 2) { r = Math.floor((2 - rainbowPhase) * 255); g = 255; b = 0; }
-    else if (rainbowPhase < 3) { r = 0; g = 255; b = Math.floor((rainbowPhase - 2) * 255); }
-    else if (rainbowPhase < 4) { r = 0; g = Math.floor((4 - rainbowPhase) * 255); b = 255; }
-    else if (rainbowPhase < 5) { r = Math.floor((rainbowPhase - 4) * 255); g = 0; b = 255; }
-    else { r = 255; g = 0; b = Math.floor((6 - rainbowPhase) * 255); }
-    const alpha = 0.55 + 0.25 * Math.sin(t * 3.5);
-    ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
-    ctx.fillText('∞', a.cx, fs*0.05);
+    const rainbowPhase = (t * 2.5) % 6; // Slightly faster cycle
+    let infR, infG, infB;
+    if (rainbowPhase < 1) { infR = 255; infG = Math.floor(rainbowPhase * 255); infB = 0; }
+    else if (rainbowPhase < 2) { infR = Math.floor((2 - rainbowPhase) * 255); infG = 255; infB = 0; }
+    else if (rainbowPhase < 3) { infR = 0; infG = 255; infB = Math.floor((rainbowPhase - 2) * 255); }
+    else if (rainbowPhase < 4) { infR = 0; infG = Math.floor((4 - rainbowPhase) * 255); infB = 255; }
+    else if (rainbowPhase < 5) { infR = Math.floor((rainbowPhase - 4) * 255); infG = 0; infB = 255; }
+    else { infR = 255; infG = 0; infB = Math.floor((6 - rainbowPhase) * 255); }
+    
+    const infPower = 0.85 + 0.15 * Math.sin(t * 4.0); // Pulsing brightness
+    const infSize = Math.floor(fs * 0.80); // Much bigger!
+    const infY = fs * 0.15;
+    
+    // Draw with tube text effect for consistency
+    const infColorStr = `rgba(${infR},${infG},${infB},ALPHA)`;
+    drawTubeText('∞', a.cx, infY, infSize, infColorStr, infPower, 0.20, TITLE_INNER_PALETTE);
     
     // MOTTO at top (above HUD) - ALWAYS VISIBLE
     ctx.globalCompositeOperation = 'source-over';
