@@ -3921,6 +3921,296 @@ function drawMenuScreen(now){
 
   log('INFO', 'Starting main loop');
   requestAnimationFrame(frameLoop);
+  
+  // ===============================
+  // Testing & Debug API
+  // ===============================
+  window.NEOVECTR = {
+    // Menu navigation
+    menu: {
+      goto(page) {
+        if (!['MAIN', 'SETTINGS', 'CREDITS', 'VS_PRE', 'VS_CUSTOM'].includes(page)) {
+          throw new Error(`Invalid page: ${page}`);
+        }
+        menuPage = page;
+        menuSel = 0;
+        const items = menuItems();
+        while (items[menuSel] && items[menuSel].kind === 'header' && menuSel < items.length - 1) menuSel++;
+        menuPageEnterT0 = performance.now();
+        log('API', `Menu goto: ${page}`);
+      },
+      select(index) {
+        const items = menuItems();
+        if (index < 0 || index >= items.length) throw new Error(`Invalid index: ${index}`);
+        if (items[index].kind === 'header') throw new Error('Cannot select header');
+        menuSel = index;
+        log('API', `Menu select: ${index}`);
+      },
+      activate() {
+        const items = menuItems();
+        if (items[menuSel].action) {
+          items[menuSel].action();
+          log('API', `Menu activated: ${menuSel}`);
+        }
+      },
+      getSetting(key) {
+        if (!(key in settings)) throw new Error(`Unknown setting: ${key}`);
+        return settings[key];
+      },
+      setSetting(key, value) {
+        if (!(key in settings)) throw new Error(`Unknown setting: ${key}`);
+        settings[key] = value;
+        saveSettings();
+        log('API', `Setting changed: ${key} = ${value}`);
+      },
+      getCurrentPage() {
+        return menuPage;
+      },
+      getItems() {
+        return menuItems().map((item, i) => ({
+          index: i,
+          label: item.labelFn ? item.labelFn(performance.now()) : item.label,
+          kind: item.kind,
+          selectable: item.kind !== 'header'
+        }));
+      }
+    },
+    
+    // Game creation & control
+    game: {
+      start(mode, options = {}) {
+        if (!['SNIP3', 'VS'].includes(mode)) throw new Error(`Invalid mode: ${mode}`);
+        stopMenuMusic();
+        gameMode = mode;
+        appMode = 'GAME';
+        menuPage = 'MAIN';
+        
+        if (options.players) setPlayerCount(options.players);
+        if (options.seed) setSeed(options.seed);
+        if (options.coop !== undefined) settings.coop = options.coop;
+        
+        resetP1Systems();
+        setDebugVisible(false);
+        initPlayers();
+        log('API', `Game started: ${mode} with ${playerCount} players`);
+      },
+      pause() {
+        if (appMode !== 'GAME') throw new Error('Not in game');
+        appMode = 'PAUSE';
+        pauseSel = 0;
+        pauseEnterT0 = performance.now();
+        log('API', 'Game paused');
+      },
+      resume() {
+        if (appMode !== 'PAUSE') throw new Error('Not paused');
+        appMode = 'GAME';
+        pauseEnterT0 = 0;
+        log('API', 'Game resumed');
+      },
+      quit() {
+        goMenu();
+        log('API', 'Game quit to menu');
+      },
+      getState() {
+        return {
+          mode: gameMode,
+          appMode,
+          players: players.map(p => ({
+            id: p.id,
+            alive: p.alive,
+            x: p.x,
+            y: p.y,
+            angle: p.angle,
+            score: p.score
+          })),
+          seed: currentSeed,
+          isPaused: appMode === 'PAUSE'
+        };
+      }
+    },
+    
+    // Player control
+    player: {
+      spawn(playerId, x, y, angle = 0) {
+        if (playerId < 0 || playerId >= players.length) throw new Error(`Invalid player ID: ${playerId}`);
+        const p = players[playerId];
+        p.x = x;
+        p.y = y;
+        p.angle = angle;
+        p.alive = true;
+        log('API', `Player ${playerId} spawned at (${x}, ${y})`);
+      },
+      kill(playerId) {
+        if (playerId < 0 || playerId >= players.length) throw new Error(`Invalid player ID: ${playerId}`);
+        players[playerId].alive = false;
+        log('API', `Player ${playerId} killed`);
+      },
+      teleport(playerId, x, y) {
+        if (playerId < 0 || playerId >= players.length) throw new Error(`Invalid player ID: ${playerId}`);
+        players[playerId].x = x;
+        players[playerId].y = y;
+        log('API', `Player ${playerId} teleported to (${x}, ${y})`);
+      },
+      getPosition(playerId) {
+        if (playerId < 0 || playerId >= players.length) throw new Error(`Invalid player ID: ${playerId}`);
+        const p = players[playerId];
+        return { x: p.x, y: p.y, angle: p.angle };
+      },
+      getHealth(playerId) {
+        if (playerId < 0 || playerId >= players.length) throw new Error(`Invalid player ID: ${playerId}`);
+        return { alive: players[playerId].alive, score: players[playerId].score };
+      },
+      getAll() {
+        return players.map((p, i) => ({
+          id: i,
+          alive: p.alive,
+          x: p.x,
+          y: p.y,
+          angle: p.angle,
+          score: p.score
+        }));
+      }
+    },
+    
+    // Debug/Testing
+    debug: {
+      showHUD(visible) {
+        setDebugVisible(visible);
+        log('API', `Debug HUD: ${visible ? 'SHOWN' : 'HIDDEN'}`);
+      },
+      logState() {
+        console.log('=== NEO-VECTR State Dump ===');
+        console.log('App Mode:', appMode);
+        console.log('Game Mode:', gameMode);
+        console.log('Menu Page:', menuPage);
+        console.log('Player Count:', playerCount);
+        console.log('Settings:', settings);
+        console.log('Players:', players);
+        console.log('Lasers:', lasers.length);
+        console.log('Seed:', currentSeed);
+        console.log('===========================');
+      },
+      getPerformance() {
+        return {
+          fps: perfFrames / Math.max(0.001, perfTimer),
+          frameTime: (perfTimer / Math.max(1, perfFrames)) * 1000,
+          frames: perfFrames,
+          elapsed: perfTimer
+        };
+      },
+      screenshot() {
+        return new Promise((resolve) => {
+          canvas.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            log('API', 'Screenshot captured');
+            resolve({ blob, url });
+          });
+        });
+      },
+      getCanvas() {
+        return canvas;
+      },
+      getContext() {
+        return ctx;
+      }
+    },
+    
+    // Audio control
+    audio: {
+      setMusicVolume(vol) {
+        settings.musicVol = clamp(vol, 0, 1);
+        if (menuMusicEl) menuMusicEl.volume = settings.musicVol;
+        saveSettings();
+        log('API', `Music volume: ${Math.round(vol * 100)}%`);
+      },
+      setSFXVolume(vol) {
+        settings.sfxVol = clamp(vol, 0, 1);
+        refreshSfxVolumes();
+        saveSettings();
+        log('API', `SFX volume: ${Math.round(vol * 100)}%`);
+      },
+      toggleCategory(category, enabled) {
+        const key = `sfx${category.charAt(0).toUpperCase() + category.slice(1)}`;
+        if (!(key in settings)) throw new Error(`Unknown category: ${category}`);
+        settings[key] = enabled;
+        saveSettings();
+        log('API', `${category} SFX: ${enabled ? 'ON' : 'OFF'}`);
+      },
+      getState() {
+        return {
+          musicVolume: settings.musicVol,
+          sfxVolume: settings.sfxVol,
+          categories: {
+            laserFire: settings.sfxLaserFire,
+            laserRicochet: settings.sfxLaserRicochet,
+            boost: settings.sfxBoost,
+            explosions: settings.sfxExplosions,
+            menu: settings.sfxMenu
+          },
+          menuMusicPlaying: menuMusicEl && !menuMusicEl.paused
+        };
+      }
+    },
+    
+    // Utility
+    version: 'v1.0.0',
+    build: '2026.01.22',
+    help() {
+      console.log(`
+╔═══════════════════════════════════════════╗
+║  NEO-VECTR ∞SNIP3 Testing API v1.0.0     ║
+╚═══════════════════════════════════════════╝
+
+NEOVECTR.menu
+  .goto(page)           Navigate to menu page
+  .select(index)        Select menu item
+  .activate()           Activate current selection
+  .getSetting(key)      Get setting value
+  .setSetting(key, val) Change setting
+  .getCurrentPage()     Get current page
+  .getItems()           List menu items
+
+NEOVECTR.game
+  .start(mode, options) Start game (mode: 'SNIP3'|'VS')
+  .pause()              Pause game
+  .resume()             Resume game
+  .quit()               Quit to menu
+  .getState()           Get game state
+
+NEOVECTR.player
+  .spawn(id, x, y, angle) Spawn player
+  .kill(id)              Kill player
+  .teleport(id, x, y)    Teleport player
+  .getPosition(id)       Get player position
+  .getHealth(id)         Get player health
+  .getAll()              Get all players
+
+NEOVECTR.debug
+  .showHUD(visible)    Toggle debug HUD
+  .logState()          Dump state to console
+  .getPerformance()    Get FPS/frame time
+  .screenshot()        Capture canvas
+  .getCanvas()         Get canvas element
+  .getContext()        Get 2D context
+
+NEOVECTR.audio
+  .setMusicVolume(vol)      Set music volume (0-1)
+  .setSFXVolume(vol)        Set SFX volume (0-1)
+  .toggleCategory(cat, on)  Toggle SFX category
+  .getState()               Get audio state
+
+Examples:
+  NEOVECTR.game.start('VS', { players: 4, seed: 'TEST' });
+  NEOVECTR.menu.setSetting('brightness', 0.20);
+  NEOVECTR.player.teleport(0, 500, 500);
+  NEOVECTR.debug.getPerformance();
+      `);
+    }
+  };
+  
+  // Log API availability
+  log('INFO', 'Testing API loaded: window.NEOVECTR');
+  log('INFO', 'Type NEOVECTR.help() for usage');
 })();
 </script>
 
